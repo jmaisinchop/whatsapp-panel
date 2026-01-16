@@ -1,0 +1,58 @@
+# Environment Variables
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+.env.staging
+.env*.local
+
+# Excepción: Permitir archivos de ejemplo
+!.env.example
+!.env.template
+
+# Baileys WhatsApp Auth
+baileys_auth_info/
+baileys_store/
+
+# Uploads
+uploads/
+*.log
+
+# Secrets
+secret/
+secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Node
+node_modules/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+coverage/
+.nyc_output/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+
+package-lock.json
+
+
