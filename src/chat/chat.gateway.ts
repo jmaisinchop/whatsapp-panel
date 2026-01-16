@@ -8,6 +8,7 @@ import { PresenceService } from './presence.service';
 import { ChatService } from './chat.service';
 import { Chat } from './entities/chat.entity';
 import { OnEvent } from '@nestjs/event-emitter';
+import { WhatsappService } from 'src/whatsapp/whatsapp.service';
 
 @WebSocketGateway({
   cors: { origin: '*' },
@@ -23,6 +24,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private readonly jwtService: JwtService,
     @Inject(forwardRef(() => ChatService))
     private readonly chatService: ChatService,
+    private readonly whatsappService: WhatsappService,
   ) { }
 
   // ✅ MÉTODO MODIFICADO PARA ASIGNAR CHATS PENDIENTES
@@ -32,7 +34,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       if (!token) throw new Error('No se proporcionó token de autenticación');
 
       const payload = await this.jwtService.verifyAsync(token);
-      
+
       // ✅ CORRECCIÓN: Usar Number.parseInt en lugar de parseInt global
       const userId = Number.parseInt(payload.sub, 10);
 
@@ -55,6 +57,13 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       }
 
       this.logger.log(`Cliente autenticado y conectado: ${client.id}, UserID: ${userId}`);
+      const currentState = this.whatsappService.getConnectionState();
+
+      // Se lo enviamos INMEDIATAMENTE al usuario que acaba de entrar
+      client.emit('admin:status', { status: currentState.status });
+
+      console.log(`📡 Saludando a nuevo cliente con estado: ${currentState.status}`);
+
     } catch (error) {
       this.logger.error('Error de autenticación de socket:', error.message);
       client.disconnect();
@@ -120,7 +129,8 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   @OnEvent('whatsapp.status')
-  handleStatusUpdate(payload: { status: string }) {
-    this.server.emit('admin:status', payload);
+  handleWhatsappStatus(payload: { status: string }) {
+    console.log('📡 Reenviando estado a frontend:', payload);
+    this.server.emit('admin:status', payload); // 'admin:status' es lo que escucha tu Frontend
   }
 }

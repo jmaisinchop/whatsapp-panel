@@ -1,4 +1,4 @@
-// src/whatsapp/whatsapp.service.ts - VERSIÓN LIMPIA (SONARLINT APPROVED)
+// src/whatsapp/whatsapp.service.ts - VERSIÓN FINAL CORREGIDA
 
 import {
   Injectable,
@@ -106,6 +106,22 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async connectToWhatsApp() {
+    // === FIX START: LIMPIEZA DE ZOMBIES ===
+    // Esto es lo que faltaba para evitar el error 440
+    if (this.sock) {
+      try {
+        this.logger.debug('🧹 Limpiando conexión socket anterior para evitar conflictos...');
+        this.sock.ev.removeAllListeners('connection.update');
+        this.sock.ev.removeAllListeners('creds.update');
+        this.sock.ev.removeAllListeners('messages.upsert');
+        this.sock.end(undefined);
+        this.sock = null;
+      } catch (error) {
+        this.logger.warn('⚠️ Error al limpiar socket anterior:', error);
+      }
+    }
+    // === FIX END ===
+
     try {
       const { state, saveCreds } = await useMultiFileAuthState('baileys_auth_info');
       const { version } = await fetchLatestBaileysVersion();
@@ -172,8 +188,9 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
     if (statusCode === 440) {
-      this.logger.warn('⚠️ Conflicto de sesión (440).');
-      this.scheduleReconnect(10000);
+      this.logger.warn('⚠️ Conflicto de sesión (440) detectado. Reintentando limpieza...');
+      // Reduje el tiempo a 2s porque ahora tenemos limpieza automática en connectToWhatsApp
+      this.scheduleReconnect(2000); 
       return;
     }
 
@@ -204,8 +221,15 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    // === FIX START: Evitar timers duplicados ===
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+    }
+    // === FIX END ===
+
     this.reconnectAttempts++;
     const delay = delayMs || Math.min(5000 * Math.pow(2, this.reconnectAttempts - 1), 60000);
+    
     this.reconnectTimer = setTimeout(() => {
       this.connectToWhatsApp();
     }, delay);
@@ -216,6 +240,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     this.isReady = true;
     this.reconnectAttempts = 0;
     this.resetCircuitBreaker();
+    this.eventEmitter.emit('whatsapp.status', { status: 'connected' });
     this.eventEmitter.emit('whatsapp.ready');
   }
 

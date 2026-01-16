@@ -24,10 +24,10 @@ export class DashboardService {
   constructor(
     @InjectRepository(SurveyResponse)
     private readonly surveyResponseRepo: Repository<SurveyResponse>,
-    
+
     @Inject(CACHE_MANAGER)
     private cacheManager: Cache,
-  ) {}
+  ) { }
 
   /**
    * ✅ OPTIMIZADO: Obtener analytics con caché inteligente
@@ -47,7 +47,7 @@ export class DashboardService {
 
       // 2. Si no está en caché, calcular
       this.logger.debug('🔄 Calculando dashboard analytics desde DB...');
-      
+
       const analytics = await this.calculateAnalytics();
 
       // 3. Guardar en caché
@@ -55,10 +55,10 @@ export class DashboardService {
       this.logger.debug(`💾 Dashboard guardado en caché (${this.CACHE_TTL}s)`);
 
       return analytics;
-      
+
     } catch (error) {
       this.logger.error('❌ Error obteniendo analytics:', error.stack);
-      
+
       // En caso de error, intentar devolver data básica
       return {
         counts: {
@@ -126,7 +126,7 @@ export class DashboardService {
   async invalidateSurveyCache(): Promise<void> {
     try {
       const deleted = await this.cacheManager.del(this.CACHE_KEY);
-      
+
       if (deleted) {
         this.logger.log('🗑️ Caché de dashboard invalidado correctamente');
       } else {
@@ -153,7 +153,7 @@ export class DashboardService {
       ]);
 
       // Calcular porcentajes
-      const calculatePercentage = (count: number) => 
+      const calculatePercentage = (count: number) =>
         total > 0 ? Math.round((count / total) * 100) : 0;
 
       return {
@@ -195,16 +195,24 @@ export class DashboardService {
     try {
       const startDate = new Date();
       startDate.setDate(startDate.getDate() - days);
+      // Importante: Resetear horas para incluir todo el día inicial
+      startDate.setHours(0, 0, 0, 0);
 
       const surveys = await this.surveyResponseRepo
         .createQueryBuilder('survey')
-        .select("DATE(survey.createdAt AT TIME ZONE 'America/Guayaquil')", 'date')
+        // CAMBIO 1: Usar TO_CHAR para asegurar que devuelva un String 'YYYY-MM-DD'
+        .select("TO_CHAR(survey.createdAt AT TIME ZONE 'America/Guayaquil', 'YYYY-MM-DD')", 'date')
         .addSelect('survey.rating', 'rating')
-        .addSelect('COUNT(*)', 'count')
+        .addSelect('COUNT(*)', 'count') // Devuelve string, se debe parsear a int luego
         .where('survey.createdAt >= :startDate', { startDate })
-        .groupBy('date, survey.rating')
+        // CAMBIO 2: Agrupar por la expresión completa, no por el alias (más seguro en Postgres)
+        .groupBy("TO_CHAR(survey.createdAt AT TIME ZONE 'America/Guayaquil', 'YYYY-MM-DD')")
+        .addGroupBy('survey.rating')
         .orderBy('date', 'ASC')
         .getRawMany();
+
+      // Debug: Ver qué devuelve exactamente la BD ahora
+      // console.log('Surveys Raw Data:', surveys);
 
       // Formatear datos para gráficos
       const trendData = this.formatTrendData(surveys, days);
@@ -218,7 +226,6 @@ export class DashboardService {
       throw error;
     }
   }
-
   /**
    * ✅ NUEVO: Formatear datos de tendencia
    */
@@ -258,7 +265,7 @@ export class DashboardService {
   async getCommentsByRating(rating: SurveyRating, limit: number = 10) {
     try {
       return await this.surveyResponseRepo.find({
-        where: { 
+        where: {
           rating,
           comment: Not(IsNull()),
         },
@@ -285,11 +292,11 @@ export class DashboardService {
         'dashboard:realtime-stats',
         'dashboard:trend',
       ];
-      
+
       await Promise.all(
         keysToDelete.map(key => this.cacheManager.del(key))
       );
-      
+
       this.logger.log('🧹 Caché del dashboard limpiado correctamente');
     } catch (error) {
       this.logger.error('❌ Error limpiando caché:', error);
