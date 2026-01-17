@@ -1,4 +1,5 @@
-import { Controller, Post, Body, UseGuards, Get, Patch, Delete, Param, ParseIntPipe, NotFoundException, BadRequestException, Req, Query } from '@nestjs/common';
+// user.controller.ts
+import { Controller, Post, Body, UseGuards, Get, Patch, Delete, Param, ParseIntPipe, BadRequestException, Req, Query } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { UserService } from './user.service';
 import { Roles } from '../auth/guards/roles.decorator';
@@ -10,7 +11,7 @@ import { UpdateUserDto } from './dto/update-user.dto';
 @UseGuards(AuthGuard('jwt'), RolesGuard)
 @Roles('admin')
 export class UserController {
-  constructor(private userService: UserService) { }
+  constructor(private readonly userService: UserService) { }
 
   @Get()
   findAll(
@@ -18,8 +19,8 @@ export class UserController {
     @Query('limit') limit: string,
     @Query('search') search: string,
   ) {
-    const pageNumber = parseInt(page, 10) || 1;
-    const limitNumber = parseInt(limit, 10) || 10;
+    const pageNumber = Number.parseInt(page, 10) || 1;
+    const limitNumber = Number.parseInt(limit, 10) || 10;
     return this.userService.findAll(pageNumber, limitNumber, search);
   }
 
@@ -44,21 +45,19 @@ export class UserController {
     return this.userService.update(id, updateUserDto);
   }
 
-  // Este endpoint ahora hace un "soft delete"
   @Delete(':id')
   remove(@Param('id', ParseIntPipe) id: number, @Req() req) {
-    // Lógica de seguridad para evitar que un admin se desactive a sí mismo
     if (req.user.userId === id) {
       throw new BadRequestException('No puedes desactivarte a ti mismo.');
     }
     return this.userService.remove(id);
   }
 
-  // NUEVO ENDPOINT PARA REACTIVAR
   @Post(':id/restore')
   restore(@Param('id', ParseIntPipe) id: number) {
     return this.userService.restore(id);
   }
+
   @Get('list/agents')
   listAgents() {
     return this.userService.findAllAgents();

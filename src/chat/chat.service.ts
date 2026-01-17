@@ -1,15 +1,4 @@
-// src/chat/chat.service.ts - VERSIÓN CORREGIDA COMPLETA
-// =====================================================
-// CORRECCIONES APLICADAS:
-// ✅ 1. Validación de agentes conectados en assignChat
-// ✅ 2. Race condition con Redis lock
-// ✅ 3. Variable AGENT_RESPONSE_TIMEOUT_MS corregida
-// ✅ 4. Cleanup de timers en OnModuleDestroy
-// ✅ 5. Manejo de errores mejorado
-// ✅ 6. N+1 query optimizado
-// ✅ 7. Logging estructurado
-// =====================================================
-
+// chat.service.ts
 import { Injectable, Logger, forwardRef, Inject, NotFoundException, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, LessThan, DataSource } from 'typeorm';
@@ -30,16 +19,15 @@ import { ChatStatus } from '../common/enums/chat-status.enum';
 import { MessageSender } from '../common/enums/message-sender.enum';
 import { PresenceService } from './presence.service';
 import { PaginationDto, PaginatedResponse } from './dto/pagination.dto';
-import * as fs from 'fs/promises';
-import * as path from 'path';
-import * as crypto from 'crypto';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+import * as crypto from 'node:crypto';
 import { lookup } from 'mime-types';
 
 @Injectable()
 export class ChatService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(ChatService.name);
   
-  // Timers
   private readonly autoResponderTimeouts: Map<number, NodeJS.Timeout> = new Map();
   private readonly agentResponseTimeouts: Map<number, NodeJS.Timeout> = new Map();
 
@@ -58,10 +46,6 @@ export class ChatService implements OnModuleInit, OnModuleDestroy {
     private readonly schedulerRegistry: SchedulerRegistry,
   ) { }
 
-  // =====================================================
-  // LIFECYCLE HOOKS
-  // =====================================================
-
   onModuleInit() {
     const schedule = this.configService.get<string>('RELEASE_INACTIVE_CHATS_CRON_SCHEDULE', '0 0 */12 * * *');
     
@@ -72,124 +56,124 @@ export class ChatService implements OnModuleInit, OnModuleDestroy {
     this.schedulerRegistry.addCronJob('releaseLongActiveChats', job as any);
     job.start();
     
-    this.logger.log(`🕒 Cron 'releaseLongActiveChats' registrado: "${schedule}"`);
+    this.logger.log(`[CRON] Job 'releaseLongActiveChats' registrado: "${schedule}"`);
   }
 
-  // ✅ NUEVO: Cleanup al destruir el módulo
   onModuleDestroy() {
-    this.logger.log('🧹 Limpiando timers antes de destruir el servicio...');
+    this.logger.log('[CLEANUP] Limpiando timers antes de destruir el servicio...');
     
-    // Limpiar todos los timers
     this.autoResponderTimeouts.forEach((timer) => clearTimeout(timer));
     this.agentResponseTimeouts.forEach((timer) => clearTimeout(timer));
     
     this.autoResponderTimeouts.clear();
     this.agentResponseTimeouts.clear();
     
-    this.logger.log('✅ Timers limpiados correctamente');
+    this.logger.log('[CLEANUP] Timers limpiados correctamente');
   }
-
-  // =====================================================
-  // MANEJO DE MENSAJES ENTRANTES
-  // =====================================================
 
   @OnEvent('whatsapp.message')
   async handleIncomingMessage(message: SimplifiedMessage) {
     const contactNumber = message.from.split('@')[0];
     
-    // ✅ CORRECCIÓN: Usar Redis para lock distribuido (evita race conditions)
     const lockKey = `chat:processing:${contactNumber}`;
-    const lockAcquired = await this.redisStore.acquireLock(lockKey, 30000); // 30s lock
+    const lockAcquired = await this.redisStore.acquireLock(lockKey, 30000);
     
     if (!lockAcquired) {
-      this.logger.debug(`🛡️ Mensaje ignorado: chat ${contactNumber} está siendo procesado por otra instancia`);
+      this.logger.debug(`[LOCK] Mensaje ignorado: chat ${contactNumber} está siendo procesado por otra instancia`);
       return;
     }
 
     try {
-      const now = new Date();
-      let chat = await this.chatRepo.findOne({ 
-        where: { contactNumber }, 
-        relations: ['assignedTo'] 
-      });
-
-      if (chat) {
-        if (chat.status !== ChatStatus.ACTIVE && chat.status !== ChatStatus.PENDING_ASSIGNMENT) {
-           chat.status = ChatStatus.AUTO_RESPONDER;
-           chat.assignedTo = null;
-        }
-        chat.updatedAt = now;
-      } else {
-        this.logger.log(`📝 Creando nuevo chat para: ${contactNumber}`);
-        chat = this.chatRepo.create({
-          contactNumber,
-          customerName: null, 
-          status: ChatStatus.AUTO_RESPONDER,
-          unreadCount: 0,
-          createdAt: now,
-          updatedAt: now,
-        });
-      }
-
-      await this.chatRepo.save(chat);
-      await this.saveCustomerMessage(chat, message);
-
-      // Verificar conexión de WhatsApp
-      if (!this.whatsappService.isReady) {
-        this.logger.warn(`⚠️ WhatsApp desconectado. Asignando chat #${chat.id} a asesor.`);
-        await this.createSystemMessage(chat, 'Mensaje recibido sin conexión de WhatsApp. Asignando a asesor.');
-        chat.status = ChatStatus.PENDING_ASSIGNMENT;
-        await this.chatRepo.save(chat);
-        await this.autoAssignChat(chat);
-        return;
-      }
-
-      // Si está activo o pendiente, no hacer nada (agente lo maneja)
-      if (chat.status === ChatStatus.ACTIVE || chat.status === ChatStatus.PENDING_ASSIGNMENT) {
-        return;
-      }
-
-      // Flujo automático del bot
-      if (chat.status === ChatStatus.AUTO_RESPONDER && !message.hasMedia) {
-        this.startAutoResponderTimer(chat.id);
-        
-        try {
-          const responseText = await this.conversationFlow.handleIncomingMessage(chat, message.body);
-
-          if (responseText === '__ACTIVATE_CHAT_WITH_ADVISOR__') {
-            await this.whatsappService.sendTyping(chat.contactNumber, 1500);
-            await this.activateChatWithAdvisor(chat);
-            
-          } else if (responseText) {
-            const humanDelay = Math.min(Math.max(responseText.length * 50, 1500), 7000);
-            await this.whatsappService.sendTyping(chat.contactNumber, humanDelay);
-            await this.sendBotMessage(chat, responseText);
-          }
-        } catch (error) {
-          this.logger.error(`❌ Error en flujo chat #${chat.id}:`, error.stack);
-          await this.whatsappService.sendTyping(chat.contactNumber, 2000);
-          await this.sendBotMessage(chat, 'Tuve un problema técnico. Un asesor te contactará pronto.');
-          await this.activateChatWithAdvisor(chat);
-        }
-      }
-
+      await this.processIncomingMessage(message, contactNumber);
     } catch (error) {
-      this.logger.error(`❌ Error crítico procesando mensaje de ${contactNumber}:`, error.stack);
+      this.logger.error(`[ERROR] Error crítico procesando mensaje de ${contactNumber}:`, error.stack);
     } finally {
-      // ✅ IMPORTANTE: Liberar el lock
       await this.redisStore.releaseLock(lockKey);
     }
   }
 
-  // =====================================================
-  // GESTIÓN DE AGENTES
-  // =====================================================
+  private async processIncomingMessage(message: SimplifiedMessage, contactNumber: string) {
+    const now = new Date();
+    let chat = await this.chatRepo.findOne({ 
+      where: { contactNumber }, 
+      relations: ['assignedTo'] 
+    });
+
+    chat = await this.updateOrCreateChat(chat, contactNumber, now);
+    await this.saveCustomerMessage(chat, message);
+
+    if (!this.whatsappService.isReady) {
+      await this.handleWhatsappDisconnected(chat);
+      return;
+    }
+
+    if (chat.status === ChatStatus.ACTIVE || chat.status === ChatStatus.PENDING_ASSIGNMENT) {
+      return;
+    }
+
+    if (chat.status === ChatStatus.AUTO_RESPONDER && !message.hasMedia) {
+      await this.handleAutoResponderFlow(chat, message);
+    }
+  }
+
+  private async updateOrCreateChat(chat: Chat | null, contactNumber: string, now: Date): Promise<Chat> {
+    if (chat) {
+      if (chat.status !== ChatStatus.ACTIVE && chat.status !== ChatStatus.PENDING_ASSIGNMENT) {
+        chat.status = ChatStatus.AUTO_RESPONDER;
+        chat.assignedTo = null;
+      }
+      chat.updatedAt = now;
+    } else {
+      this.logger.log(`[NEW_CHAT] Creando nuevo chat para: ${contactNumber}`);
+      chat = this.chatRepo.create({
+        contactNumber,
+        customerName: null, 
+        status: ChatStatus.AUTO_RESPONDER,
+        unreadCount: 0,
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+
+    return this.chatRepo.save(chat);
+  }
+
+  private async handleWhatsappDisconnected(chat: Chat) {
+    this.logger.warn(`[WHATSAPP] WhatsApp desconectado. Asignando chat #${chat.id} a asesor.`);
+    await this.createSystemMessage(chat, 'Mensaje recibido sin conexión de WhatsApp. Asignando a asesor.');
+    chat.status = ChatStatus.PENDING_ASSIGNMENT;
+    await this.chatRepo.save(chat);
+    await this.autoAssignChat(chat);
+  }
+
+  private async handleAutoResponderFlow(chat: Chat, message: SimplifiedMessage) {
+    this.startAutoResponderTimer(chat.id);
+    
+    try {
+      const responseText = await this.conversationFlow.handleIncomingMessage(chat, message.body);
+
+      if (responseText === '__ACTIVATE_CHAT_WITH_ADVISOR__') {
+        await this.whatsappService.sendTyping(chat.contactNumber, 1500);
+        await this.activateChatWithAdvisor(chat);
+        
+      } else if (responseText) {
+        const humanDelay = Math.min(Math.max(responseText.length * 50, 1500), 7000);
+        await this.whatsappService.sendTyping(chat.contactNumber, humanDelay);
+        await this.sendBotMessage(chat, responseText);
+      }
+    } catch (error) {
+      this.logger.error(`[FLOW_ERROR] Error en flujo chat #${chat.id}:`, error.stack);
+      await this.whatsappService.sendTyping(chat.contactNumber, 2000);
+      await this.sendBotMessage(chat, 'Tuve un problema técnico. Un asesor te contactará pronto.');
+      await this.activateChatWithAdvisor(chat);
+    }
+  }
 
   private async activateChatWithAdvisor(chat: Chat) {
     chat.status = ChatStatus.ACTIVE;
     await this.chatRepo.save(chat);
 
-    const handoffMessage = '¡Entendido! Uno de nuestros asesores se pondrá en contacto con usted lo más pronto posible. Por favor espere un momento. ⏳';
+    const handoffMessage = '¡Entendido! Uno de nuestros asesores se pondrá en contacto con usted lo más pronto posible. Por favor espere un momento.';
     await this.sendBotMessage(chat, handoffMessage);
 
     this.chatGateway.notifyNewChat(chat);
@@ -205,7 +189,7 @@ export class ChatService implements OnModuleInit, OnModuleDestroy {
       .map(agent => agent.id);
 
     if (availableAgentIds.length === 0) {
-      this.logger.warn(`⚠️ Sin agentes conectados. Chat #${chat.id} a cola de espera.`);
+      this.logger.warn(`[AUTO_ASSIGN] Sin agentes conectados. Chat #${chat.id} a cola de espera.`);
       chat.status = ChatStatus.PENDING_ASSIGNMENT;
       await this.chatRepo.save(chat);
       await this.redisStore.addChatToWaitingQueue(chat.id);
@@ -224,7 +208,6 @@ export class ChatService implements OnModuleInit, OnModuleDestroy {
     return this.redisStore.getNextChatInQueue();
   }
 
-  // ✅ CORRECCIÓN: Validar que el agente esté conectado
   public async assignChat(chatId: number, agentId: number, isAutoAssignment = false) {
     const chat = await this.chatRepo.findOne({ where: { id: chatId } });
     if (!chat) {
@@ -236,12 +219,11 @@ export class ChatService implements OnModuleInit, OnModuleDestroy {
       throw new NotFoundException('Agente no encontrado');
     }
 
-    // ✅ VALIDACIÓN CRÍTICA: Verificar conexión del agente
     const connectedAgents = this.presenceService.getConnectedAgents();
     const isAgentConnected = connectedAgents.some(a => a.id === agentId);
     
     if (!isAgentConnected && !isAutoAssignment) {
-      this.logger.warn(`⚠️ Intento de asignar chat #${chatId} a agente desconectado #${agentId}`);
+      this.logger.warn(`[ASSIGN] Intento de asignar chat #${chatId} a agente desconectado #${agentId}`);
       throw new Error('El agente no está conectado. No se puede asignar el chat.');
     }
 
@@ -292,12 +274,11 @@ export class ChatService implements OnModuleInit, OnModuleDestroy {
     
     this.chatGateway.sendNewMessage({ chatId, message: newMsg, senderId: userId });
     
-    // ✅ MEJORA: Manejo de errores en envío de WhatsApp
     try {
       await this.whatsappService.sendMessage(chat.contactNumber, content);
     } catch (error) {
-      this.logger.error(`❌ Error enviando mensaje por WhatsApp:`, error);
-      await this.createSystemMessage(chat, '⚠️ Error al enviar mensaje por WhatsApp. Intente nuevamente.');
+      this.logger.error(`[WHATSAPP_SEND] Error enviando mensaje por WhatsApp:`, error);
+      await this.createSystemMessage(chat, 'Error al enviar mensaje por WhatsApp. Intente nuevamente.');
       throw error;
     }
     
@@ -337,7 +318,7 @@ export class ChatService implements OnModuleInit, OnModuleDestroy {
         userState.step = ConversationStep.SURVEY;
         await this.redisStore.setUserState(chat.contactNumber, userState);
       } catch (error) {
-        this.logger.error(`❌ Error enviando encuesta:`, error);
+        this.logger.error(`[SURVEY] Error enviando encuesta:`, error);
       }
     }
     
@@ -368,29 +349,24 @@ export class ChatService implements OnModuleInit, OnModuleDestroy {
     
     try {
       await this.whatsappService.sendTyping(completeUpdatedChat.contactNumber, 2000);
-      const farewellMessage = 'Gracias por escribirnos. Si necesitas algo más, aquí estaré. ¡Hasta pronto! 👋';
+      const farewellMessage = 'Gracias por escribirnos. Si necesitas algo más, aquí estaré. ¡Hasta pronto!';
       await this.sendBotMessage(completeUpdatedChat, farewellMessage);
     } catch (error) {
-      this.logger.error(`❌ Error enviando mensaje de despedida:`, error);
+      this.logger.error(`[FAREWELL] Error enviando mensaje de despedida:`, error);
     }
     
     return completeUpdatedChat;
   }
 
-  // =====================================================
-  // TIMERS
-  // =====================================================
-
   private startAgentResponseTimer(chatId: number, agentId: number) {
     this.cancelAgentResponseTimer(chatId);
     
-    // ✅ CORRECCIÓN: Usar variable correcta
     const timeoutMs = this.configService.get<number>(
       'AGENT_RESPONSE_TIMEOUT_MS', 
-      300000 // 5 minutos default
+      300000
     );
     
-    this.logger.debug(`⏱️ Timer iniciado para chat #${chatId} - ${timeoutMs}ms`);
+    this.logger.debug(`[TIMER] Timer iniciado para chat #${chatId} - ${timeoutMs}ms`);
     
     const timer = setTimeout(() => {
       this.reassignUnansweredChat(chatId, agentId);
@@ -403,7 +379,7 @@ export class ChatService implements OnModuleInit, OnModuleDestroy {
     if (this.agentResponseTimeouts.has(chatId)) {
       clearTimeout(this.agentResponseTimeouts.get(chatId));
       this.agentResponseTimeouts.delete(chatId);
-      this.logger.debug(`⏱️ Timer cancelado para chat #${chatId}`);
+      this.logger.debug(`[TIMER] Timer cancelado para chat #${chatId}`);
     }
   }
 
@@ -417,7 +393,7 @@ export class ChatService implements OnModuleInit, OnModuleDestroy {
       return;
     }
     
-    this.logger.warn(`⚠️ Agente ${unresponsiveAgentId} no respondió chat #${chatId}. Reasignando...`);
+    this.logger.warn(`[REASSIGN] Agente ${unresponsiveAgentId} no respondió chat #${chatId}. Reasignando...`);
     
     const connectedAgents = this.presenceService.getConnectedAgents();
     const availableAgentIds = connectedAgents
@@ -443,7 +419,7 @@ export class ChatService implements OnModuleInit, OnModuleDestroy {
     
     const timeoutMs = this.configService.get<number>(
       'AUTO_RESPONDER_TIMEOUT_MS', 
-      1800000 // 30 min default
+      1800000
     );
     
     const timer = setTimeout(async () => {
@@ -465,7 +441,7 @@ export class ChatService implements OnModuleInit, OnModuleDestroy {
           );
           await this.redisStore.resetUserState(chat.contactNumber);
         } catch (error) {
-          this.logger.error(`❌ Error en timeout del auto-responder:`, error);
+          this.logger.error(`[AUTO_TIMEOUT] Error en timeout del auto-responder:`, error);
         }
       }
       
@@ -474,10 +450,6 @@ export class ChatService implements OnModuleInit, OnModuleDestroy {
     
     this.autoResponderTimeouts.set(chatId, timer);
   }
-
-  // =====================================================
-  // CONTADOR DE NO LEÍDOS
-  // =====================================================
 
   private async incrementUnreadCount(chatId: number, amount: number = 1): Promise<void> {
     await this.chatRepo.increment({ id: chatId }, 'unreadCount', amount);
@@ -495,10 +467,6 @@ export class ChatService implements OnModuleInit, OnModuleDestroy {
   private async resetUnreadCount(chatId: number): Promise<void> {
     await this.chatRepo.update({ id: chatId }, { unreadCount: 0 });
   }
-
-  // =====================================================
-  // UTILIDADES
-  // =====================================================
 
   private async createSystemMessage(chat: Chat, content: string) {
     const systemMsg = this.messageRepo.create({ 
@@ -535,7 +503,7 @@ export class ChatService implements OnModuleInit, OnModuleDestroy {
           messageData.content = 'Archivo adjunto';
         }
       } catch (error) {
-        this.logger.error(`❌ Error guardando archivo para ${chat.contactNumber}:`, error);
+        this.logger.error(`[MEDIA_SAVE] Error guardando archivo para ${chat.contactNumber}:`, error);
       }
     }
 
@@ -560,7 +528,7 @@ export class ChatService implements OnModuleInit, OnModuleDestroy {
       await this.messageRepo.save(botMsg);
       this.chatGateway.sendNewMessage({ chatId: chat.id, message: botMsg });
     } catch (error) {
-      this.logger.error(`❌ Error enviando mensaje del bot:`, error);
+      this.logger.error(`[BOT_MESSAGE] Error enviando mensaje del bot:`, error);
       throw error;
     }
   }
@@ -596,14 +564,13 @@ export class ChatService implements OnModuleInit, OnModuleDestroy {
       
       return savedMsg;
     } catch (error) {
-      this.logger.error(`❌ Error enviando media:`, error);
+      this.logger.error(`[MEDIA_SEND] Error enviando media:`, error);
       
-      // ✅ MEJORA: Limpiar archivo si falla el envío
       try {
         await fs.unlink(file.path);
-        this.logger.log(`🗑️ Archivo ${file.filename} eliminado tras fallo de envío`);
+        this.logger.log(`[CLEANUP] Archivo ${file.filename} eliminado tras fallo de envío`);
       } catch (unlinkError) {
-        this.logger.error(`❌ Error eliminando archivo:`, unlinkError);
+        this.logger.error(`[CLEANUP] Error eliminando archivo:`, unlinkError);
       }
       
       throw error;
@@ -661,15 +628,10 @@ export class ChatService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  // =====================================================
-  // QUERIES OPTIMIZADAS
-  // =====================================================
-
   async findAll(paginationDto: PaginationDto): Promise<PaginatedResponse<Chat>> {
     const { page = 1, limit = 50 } = paginationDto;
     const skip = (page - 1) * limit;
 
-    // ✅ OPTIMIZACIÓN: Eager loading completo
     const [data, total] = await this.chatRepo
       .createQueryBuilder('chat')
       .leftJoinAndSelect('chat.assignedTo', 'assignedTo')
@@ -707,7 +669,6 @@ export class ChatService implements OnModuleInit, OnModuleDestroy {
   }
 
   async findOne(chatId: number) {
-    // ✅ OPTIMIZACIÓN: Query única con todas las relaciones
     return this.chatRepo
       .createQueryBuilder('chat')
       .leftJoinAndSelect('chat.assignedTo', 'assignedTo')
@@ -733,13 +694,13 @@ export class ChatService implements OnModuleInit, OnModuleDestroy {
     });
     
     if (oldActiveChats.length > 0) {
-      this.logger.log(`🧹 Limpiando ${oldActiveChats.length} chats inactivos por más de 24h.`);
+      this.logger.log(`[CLEANUP] Limpiando ${oldActiveChats.length} chats inactivos por más de 24h.`);
       
       for (const c of oldActiveChats) {
         try {
           await this.releaseChat(c.id, false);
         } catch (error) {
-          this.logger.error(`❌ Error liberando chat #${c.id}:`, error);
+          this.logger.error(`[CLEANUP] Error liberando chat #${c.id}:`, error);
         }
       }
     }

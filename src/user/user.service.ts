@@ -1,3 +1,4 @@
+// user.service.ts
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, Like, Not, IsNull } from 'typeorm';
@@ -10,14 +11,13 @@ import { UpdateUserDto } from './dto/update-user.dto';
 export class UserService {
   constructor(
     @InjectRepository(UserWha)
-    private userRepo: Repository<UserWha>,
+    private readonly userRepo: Repository<UserWha>,
   ) { }
 
   async findAll(page = 1, limit = 10, search = '') {
     const skip = (page - 1) * limit;
 
     const [users, total] = await this.userRepo.findAndCount({
-      // ✅ CLAVE: Agregar withDeleted para obtener también los inactivos
       withDeleted: true,
       select: ['id', 'email', 'firstName', 'lastName', 'role', 'deletedAt', 'createdAt'],
       where: [
@@ -40,7 +40,6 @@ export class UserService {
       totalPages: Math.ceil(total / limit),
     };
   }
-
 
   async findByEmail(email: string) {
     return this.userRepo.findOne({ where: { email } });
@@ -68,10 +67,7 @@ export class UserService {
     return this.userRepo.save(user);
   }
 
-  // --- FUNCIÓN 'remove' MODIFICADA ---
   async remove(id: number) {
-    // Usamos softDelete en lugar de remove. Esto no borra la fila,
-    // solo establece un valor en la columna 'deletedAt'.
     const result = await this.userRepo.softDelete({ id });
     if (result.affected === 0) {
       throw new NotFoundException('Usuario no encontrado');
@@ -79,9 +75,7 @@ export class UserService {
     return { message: 'Usuario desactivado para auditoría.' };
   }
 
-  // --- NUEVA FUNCIÓN 'restore' ---
   async restore(id: number) {
-    // .restore() busca en los borrados y pone 'deletedAt' de nuevo en NULL.
     const result = await this.userRepo.restore({ id });
     if (result.affected === 0) {
       throw new NotFoundException('Usuario no encontrado o ya está activo');
@@ -94,7 +88,6 @@ export class UserService {
   }
 
   async findAgentWithFewerChats(connectedAgentIds: number[], excludeAgentId?: number): Promise<UserWha | null> {
-    // Si no hay agentes conectados, no podemos asignar a nadie.
     if (connectedAgentIds.length === 0) {
       return null;
     }
@@ -105,7 +98,6 @@ export class UserService {
         status: ChatStatus.ACTIVE,
       })
       .where('u.role = :role', { role: 'agent' })
-      // AÑADIR ESTA LÍNEA CLAVE:
       .andWhere('u.id IN (:...connectedAgentIds)', { connectedAgentIds })
       .groupBy('u.id')
       .orderBy('COUNT(chat.id)', 'ASC')
@@ -116,15 +108,13 @@ export class UserService {
     }
     return await qb.getOne();
   }
+
   async findAllDeactivated() {
-    // Usamos `withDeleted: true` para incluir los registros borrados lógicamente
-    // y luego filtramos donde `deletedAt` NO es NULO.
     return this.userRepo.find({
       withDeleted: true,
       where: {
         deletedAt: Not(IsNull()),
       },
-      // Seleccionamos solo los campos necesarios para no exponer datos sensibles
       select: ['id', 'email', 'firstName', 'lastName', 'role', 'deletedAt'],
       order: {
         deletedAt: 'DESC'

@@ -1,4 +1,3 @@
-// src/conversation-flow/conversation-flow.interface.ts
 import { ConversationStep } from './conversation-state.enum';
 
 export interface UserState {
@@ -7,5 +6,5 @@ export interface UserState {
   empresas?: { encabezado: string; items: any[] }[];
   termsAccepted?: boolean;
   isFallback?: boolean;
-  satisfactionRating?: number; // Calificación encuesta
+  satisfactionRating?: number;
 }

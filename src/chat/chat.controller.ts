@@ -1,5 +1,4 @@
-// src/chat/chat.controller.ts - VERSIÓN COMPLETA CON TODAS LAS OPTIMIZACIONES
-
+// chat.controller.ts
 import {
   Controller,
   Get,
@@ -24,8 +23,8 @@ import { diskStorage } from 'multer';
 import { Roles } from 'src/auth/guards/roles.decorator';
 import { RolesGuard } from 'src/auth/guards/roles.guard';
 import { PaginationDto } from './dto/pagination.dto';
-import * as crypto from 'crypto';
-import { extname } from 'path';
+import * as crypto from 'node:crypto';
+import { extname } from 'node:path';
 
 @Controller('chats')
 @UseGuards(AuthGuard('jwt'))
@@ -35,7 +34,6 @@ export class ChatController {
     private readonly chatGateway: ChatGateway,
   ) {}
 
-  // ✅ FASE 3: Ahora con paginación
   @Get()
   findAll(@Query() paginationDto: PaginationDto) {
     return this.chatService.findAll(paginationDto);
@@ -64,7 +62,6 @@ export class ChatController {
     return this.chatService.sendAgentMessage(id, userId, body.content);
   }
 
-  // ✅ VALIDACIÓN DE UPLOADS MEJORADA
   @Post(':id/media')
   @UseInterceptors(
     FileInterceptor('file', {
@@ -77,30 +74,25 @@ export class ChatController {
         },
       }),
       limits: {
-        fileSize: 50 * 1024 * 1024, // 50 MB máximo
+        fileSize: 50 * 1024 * 1024,
         files: 1,
       },
       fileFilter: (req, file, cb) => {
-        // Lista blanca de tipos MIME permitidos
         const allowedMimeTypes = [
-          // Imágenes
           'image/jpeg',
           'image/jpg',
           'image/png',
           'image/gif',
           'image/webp',
-          // Videos
           'video/mp4',
           'video/mpeg',
           'video/quicktime',
           'video/x-msvideo',
-          // Audio
           'audio/mpeg',
           'audio/mp3',
           'audio/ogg',
           'audio/wav',
           'audio/webm',
-          // Documentos
           'application/pdf',
           'application/msword',
           'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -120,7 +112,6 @@ export class ChatController {
           );
         }
 
-        // Validar extensión
         const allowedExtensions = [
           '.jpg', '.jpeg', '.png', '.gif', '.webp',
           '.mp4', '.mpeg', '.mov', '.avi',
@@ -138,7 +129,6 @@ export class ChatController {
           );
         }
 
-        // Prevenir path traversal
         if (file.originalname.includes('..') || file.originalname.includes('/')) {
           return cb(
             new BadRequestException('Nombre de archivo inválido'),
@@ -179,12 +169,10 @@ export class ChatController {
   ) {
     const loggedInUser = req.user;
 
-    // Verificar permisos
     if (body.agentId && body.agentId !== loggedInUser.userId && loggedInUser.role !== 'admin') {
       throw new ForbiddenException('Solo los administradores pueden asignar chats a otros agentes.');
     }
 
-    // Auto-asignación si no se especifica agentId
     const agentIdToAssign = body.agentId ?? loggedInUser.userId;
 
     return this.chatService.assignChat(chatId, agentIdToAssign);

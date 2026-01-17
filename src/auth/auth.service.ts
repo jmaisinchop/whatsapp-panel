@@ -1,3 +1,4 @@
+// auth.service.ts
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { UserService } from '../user/user.service';
@@ -5,8 +6,8 @@ import { UserService } from '../user/user.service';
 @Injectable()
 export class AuthService {
   constructor(
-    private userService: UserService,
-    private jwtService: JwtService,
+    private readonly userService: UserService,
+    private readonly jwtService: JwtService,
   ) { }
 
   async validateUser(email: string, pass: string): Promise<any> {
@@ -18,10 +19,8 @@ export class AuthService {
     if (!isValid) {
       throw new UnauthorizedException('Contraseña incorrecta');
     }
-    return user; // Retorna el usuario
+    return user;
   }
-
-  // src/auth/auth.service.ts
 
   async login(user: any) {
     const payload = {
@@ -34,7 +33,6 @@ export class AuthService {
 
     return {
       access_token: this.jwtService.sign(payload),
-      // ✅ DEBE INCLUIR ESTO:
       user: {
         id: user.id,
         email: user.email,

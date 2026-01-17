@@ -1,20 +1,14 @@
-// src/conversation-flow/conversation-flow.service.ts - VERSIÓN CORREGIDA
-// =====================================================
-// CORRECCIONES APLICADAS:
-// ✅ 1. Invalida caché del dashboard al guardar encuesta
-// ✅ 2. Manejo de errores mejorado
-// ✅ 3. Optimización de queries con Promise.all
-// =====================================================
-
+// conversation-flow.service.ts
 import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
 import { DataSource, Repository } from 'typeorm';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Chat } from '../chat/entities/chat.entity';
 import { RedisStateStore } from './redis-state-store';
 import { ConversationStep } from './conversation-state.enum';
+import { UserState } from './conversation-flow.interface';
 import { SurveyResponse, SurveyRating } from '../chat/entities/survey-response.entity';
 import { ChatGateway } from '../chat/chat.gateway';
-import { DashboardService } from '../dashboard/dashboard.service'; // ✅ AGREGADO
+import { DashboardService } from '../dashboard/dashboard.service';
 
 @Injectable()
 export class ConversationFlowService {
@@ -25,7 +19,7 @@ export class ConversationFlowService {
     private readonly surveyResponseRepo: Repository<SurveyResponse>,
     @Inject(forwardRef(() => ChatGateway))
     private readonly chatGateway: ChatGateway,
-    @Inject(forwardRef(() => DashboardService)) // ✅ AGREGADO
+    @Inject(forwardRef(() => DashboardService))
     private readonly dashboardService: DashboardService,
     private readonly redisStore: RedisStateStore,
     private readonly dataSource: DataSource,
@@ -39,133 +33,198 @@ export class ConversationFlowService {
     const text = rawText.trim();
     const lowerText = text.toLowerCase();
 
-    // --- 1. BOTÓN DE PÁNICO ---
-    const exitCommands = ['salir', 'chao', 'adios', 'fin', 'terminar', 'cancelar', '0', 'menu', 'inicio'];
-    
-    if (exitCommands.includes(lowerText)) {
-      if (userState.step === ConversationStep.MAIN_MENU && ['menu', 'inicio', '0'].includes(lowerText)) {
-         return this.getMainMenuText(freshChat.customerName);
-      }
-
-      if (['salir', 'chao', 'adios', 'fin', 'terminar'].includes(lowerText)) {
-        userState.step = ConversationStep.SURVEY;
+    const exitResponse = this.handleExitCommands(lowerText, userState, freshChat);
+    if (exitResponse) {
+      if (exitResponse.newStep) {
+        userState.step = exitResponse.newStep;
+        userState.termsAccepted = exitResponse.resetTerms ? false : userState.termsAccepted;
         await this.redisStore.setUserState(contactNumber, userState);
-        return this.getSurveyQuestion();
       }
-
-      userState.step = ConversationStep.MAIN_MENU;
-      userState.termsAccepted = false;
-      await this.redisStore.setUserState(contactNumber, userState);
-      return '🔄 Entendido. Regresamos al menú principal.\n\n' + this.getMainMenuText();
+      return exitResponse.message;
     }
 
-    // --- 2. ENCUESTA ---
     if (userState.step === ConversationStep.SURVEY) {
       return await this.handleSurvey(chat, text);
     }
 
-    let responseText = '';
-
-    // --- 3. MÁQUINA DE ESTADOS KIKA ---
-    switch (userState.step) {
-
-      case ConversationStep.START:
-        if (!freshChat.customerName) {
-          userState.step = ConversationStep.ASK_FOR_NAME;
-          responseText = `${this.getTimeGreeting()} Soy Kika 🤖, su asistente virtual.\n\nPara brindarle una mejor atención, ¿podría indicarme su nombre, por favor?`;
-        } else {
-          userState.step = ConversationStep.MAIN_MENU;
-          responseText = `${this.getTimeGreeting()}, ${freshChat.customerName}. ¡Qué gusto verle de nuevo! 👋\n\n` + this.getMainMenuText();
-        }
-        break;
-
-      case ConversationStep.ASK_FOR_NAME:
-        if (text.length < 3 || /\d/.test(text)) {
-          responseText = 'Ese nombre no parece válido 🤔. Por favor, escriba solo su nombre real para continuar.';
-        } else {
-          freshChat.customerName = text;
-          await this.dataSource.getRepository(Chat).save(freshChat);
-          
-          userState.step = ConversationStep.MAIN_MENU;
-          responseText = `¡Un gusto, ${text}! ✅ Ya he registrado sus datos.\n\n` + this.getMainMenuText();
-        }
-        break;
-
-      case ConversationStep.MAIN_MENU:
-        if (text === '1' || lowerText.includes('consultar') || lowerText.includes('deuda')) {
-          if (userState.termsAccepted) {
-            userState.step = ConversationStep.PEDIR_CEDULA;
-            responseText = '👍 Perfecto. Por favor, ingrese su número de cédula para realizar la consulta.';
-          } else {
-            userState.step = ConversationStep.DISCLAIMER;
-            responseText = '🔒 Antes de mostrarle información privada, necesito que acepte nuestros Términos y Condiciones: https://www.finsolred.com/terminos-y-condiciones-uso-del-chatbot\n\n¿Está de acuerdo? (Responda "Sí" o "No")';
-          }
-        } else if (text === '2' || lowerText.includes('asesor') || lowerText.includes('agente')) {
-          return '__ACTIVATE_CHAT_WITH_ADVISOR__';
-        } else {
-          responseText = 'No entendí esa opción 😅. Por favor, elija una de las siguientes:\n\n' + this.getMainMenuText();
-        }
-        break;
-
-      case ConversationStep.DISCLAIMER:
-        if (['si', 'sí', 'acepto', 'ok', 'claro', 'dele'].includes(lowerText)) {
-          userState.termsAccepted = true;
-          userState.step = ConversationStep.PEDIR_CEDULA;
-          responseText = '¡Gracias por confirmar! ✅\n\nAhora sí, escríbame su número de cédula para buscar sus deudas.';
-        } else if (['no', 'rechazo', 'nunca', 'jamás'].includes(lowerText)) {
-          userState.step = ConversationStep.MAIN_MENU;
-          responseText = 'Comprendo. Respetamos su privacidad, pero sin su autorización no puedo mostrarle la información.\n\n' + this.getMainMenuText();
-        } else {
-          responseText = 'Necesito una confirmación clara. Por favor responda "Sí" para continuar o "No" para cancelar.';
-        }
-        break;
-
-      case ConversationStep.PEDIR_CEDULA:
-        const idInput = text.trim(); 
-
-        if (idInput.length < 5) {
-           responseText = 'El número parece muy corto 🧐. Por favor verifique e intente nuevamente.';
-           break;
-        }
-
-        const client = await this.findClientById(idInput);
-
-        if (!client) {
-          userState.step = ConversationStep.MAIN_MENU;
-          responseText = `🔍 Busqué en el sistema, pero no encontré registros con la cédula *${idInput}*.\n\n¿Desea intentar otra vez?\n` + this.getMainMenuText();
-        } else {
-          const deudasTexto = await this.mostrarListaEmpresas(idInput);
-          
-          if (deudasTexto.includes("¡Buenas noticias!")) {
-            responseText = `¡Estimado/a ${freshChat.customerName}, le tengo buenas noticias! 🎉\n\n*No registra deudas pendientes con nosotros.*`;
-          } else {
-            responseText = `Hola ${client.nombre}, aquí tiene su estado de cuenta 📄:\n\n${deudasTexto}`;
-          }
-          
-          userState.step = ConversationStep.MAIN_MENU;
-          responseText += `\n💡 *Tip:* Si necesita detalles específicos, la opción 2 le conecta con un humano.\n\n${this.getMainMenuText()}`;
-        }
-        break;
-
-      default:
-        userState.step = ConversationStep.MAIN_MENU;
-        responseText = '¡Ups! Me confundí un poco 😅. Mejor empecemos de nuevo.\n\n' + this.getMainMenuText();
-        break;
-    }
+    const responseText = await this.processConversationStep(
+      userState,
+      text,
+      lowerText,
+      freshChat,
+      contactNumber
+    );
 
     await this.redisStore.setUserState(contactNumber, userState);
     return responseText;
   }
 
-  // ======================================================
-  // 🎨 MÉTODOS DE TEXTO
-  // ======================================================
+  private handleExitCommands(
+    lowerText: string,
+    userState: UserState,
+    freshChat: Chat
+  ): { message: string; newStep?: ConversationStep; resetTerms?: boolean } | null {
+    const exitCommands = ['salir', 'chao', 'adios', 'fin', 'terminar', 'cancelar', '0', 'menu', 'inicio'];
+    
+    if (!exitCommands.includes(lowerText)) {
+      return null;
+    }
+
+    if (userState.step === ConversationStep.MAIN_MENU && ['menu', 'inicio', '0'].includes(lowerText)) {
+      return { message: this.getMainMenuText(freshChat.customerName) };
+    }
+
+    if (['salir', 'chao', 'adios', 'fin', 'terminar'].includes(lowerText)) {
+      return {
+        message: this.getSurveyQuestion(),
+        newStep: ConversationStep.SURVEY
+      };
+    }
+
+    return {
+      message: '[RESET] Entendido. Regresamos al menú principal.\n\n' + this.getMainMenuText(),
+      newStep: ConversationStep.MAIN_MENU,
+      resetTerms: true
+    };
+  }
+
+  private async processConversationStep(
+    userState: UserState,
+    text: string,
+    lowerText: string,
+    freshChat: Chat,
+    contactNumber: string
+  ): Promise<string> {
+    switch (userState.step) {
+      case ConversationStep.START: {
+        return this.handleStartStep(userState, freshChat);
+      }
+
+      case ConversationStep.ASK_FOR_NAME: {
+        return await this.handleNameStep(userState, text, freshChat);
+      }
+
+      case ConversationStep.MAIN_MENU: {
+        return this.handleMainMenuStep(userState, text, lowerText);
+      }
+
+      case ConversationStep.DISCLAIMER: {
+        return this.handleDisclaimerStep(userState, lowerText);
+      }
+
+      case ConversationStep.PEDIR_CEDULA: {
+        return await this.handleCedulaStep(userState, text, freshChat);
+      }
+
+      default: {
+        userState.step = ConversationStep.MAIN_MENU;
+        return '[ERROR] Ups! Me confundí un poco. Mejor empecemos de nuevo.\n\n' + this.getMainMenuText();
+      }
+    }
+  }
+
+  private handleStartStep(userState: UserState, freshChat: Chat): string {
+    if (freshChat.customerName) {
+      userState.step = ConversationStep.MAIN_MENU;
+      return `${this.getTimeGreeting()}, ${freshChat.customerName}. Qué gusto verle de nuevo!\n\n` + this.getMainMenuText();
+    }
+
+    userState.step = ConversationStep.ASK_FOR_NAME;
+    return `${this.getTimeGreeting()} Soy Kika, su asistente virtual.\n\nPara brindarle una mejor atención, ¿podría indicarme su nombre, por favor?`;
+  }
+
+  private async handleNameStep(userState: UserState, text: string, freshChat: Chat): Promise<string> {
+    if (text.length < 3 || /\d/.test(text)) {
+      return 'Ese nombre no parece válido. Por favor, escriba solo su nombre real para continuar.';
+    }
+
+    freshChat.customerName = text;
+    await this.dataSource.getRepository(Chat).save(freshChat);
+    
+    userState.step = ConversationStep.MAIN_MENU;
+    return `Un gusto, ${text}! [OK] Ya he registrado sus datos.\n\n` + this.getMainMenuText();
+  }
+
+  private handleMainMenuStep(userState: UserState, text: string, lowerText: string): string {
+    const isConsultOption = text === '1' || lowerText.includes('consultar') || lowerText.includes('deuda');
+    const isAdvisorOption = text === '2' || lowerText.includes('asesor') || lowerText.includes('agente');
+
+    if (isConsultOption) {
+      if (userState.termsAccepted) {
+        userState.step = ConversationStep.PEDIR_CEDULA;
+        return '[OK] Perfecto. Por favor, ingrese su número de cédula para realizar la consulta.';
+      }
+
+      userState.step = ConversationStep.DISCLAIMER;
+      return '[TERMS] Antes de mostrarle información privada, necesito que acepte nuestros Términos y Condiciones: https://www.finsolred.com/terminos-y-condiciones-uso-del-chatbot\n\n¿Está de acuerdo? (Responda "Sí" o "No")';
+    }
+
+    if (isAdvisorOption) {
+      return '__ACTIVATE_CHAT_WITH_ADVISOR__';
+    }
+
+    return 'No entendí esa opción. Por favor, elija una de las siguientes:\n\n' + this.getMainMenuText();
+  }
+
+  private handleDisclaimerStep(userState: UserState, lowerText: string): string {
+    const acceptTerms = ['si', 'sí', 'acepto', 'ok', 'claro', 'dele'].includes(lowerText);
+    const rejectTerms = ['no', 'rechazo', 'nunca', 'jamás'].includes(lowerText);
+
+    if (acceptTerms) {
+      userState.termsAccepted = true;
+      userState.step = ConversationStep.PEDIR_CEDULA;
+      return 'Gracias por confirmar! [OK]\n\nAhora sí, escríbame su número de cédula para buscar sus deudas.';
+    }
+
+    if (rejectTerms) {
+      userState.step = ConversationStep.MAIN_MENU;
+      return 'Comprendo. Respetamos su privacidad, pero sin su autorización no puedo mostrarle la información.\n\n' + this.getMainMenuText();
+    }
+
+    return 'Necesito una confirmación clara. Por favor responda "Sí" para continuar o "No" para cancelar.';
+  }
+
+  private async handleCedulaStep(userState: UserState, text: string, freshChat: Chat): Promise<string> {
+    const idInput = text.trim();
+
+    if (idInput.length < 5) {
+      return 'El número parece muy corto. Por favor verifique e intente nuevamente.';
+    }
+
+    const client = await this.findClientById(idInput);
+
+    if (client) {
+      return await this.buildClientDebtResponse(client, idInput, freshChat, userState);
+    }
+
+    userState.step = ConversationStep.MAIN_MENU;
+    return `[SEARCH] Busqué en el sistema, pero no encontré registros con la cédula *${idInput}*.\n\n¿Desea intentar otra vez?\n` + this.getMainMenuText();
+  }
+
+  private async buildClientDebtResponse(
+    client: any,
+    idInput: string,
+    freshChat: Chat,
+    userState: UserState
+  ): Promise<string> {
+    const deudasTexto = await this.mostrarListaEmpresas(idInput);
+    let responseText: string;
+
+    if (deudasTexto.includes("Buenas noticias!")) {
+      responseText = `Estimado/a ${freshChat.customerName}, le tengo buenas noticias! [OK]\n\n*No registra deudas pendientes con nosotros.*`;
+    } else {
+      responseText = `Hola ${client.nombre}, aquí tiene su estado de cuenta:\n\n${deudasTexto}`;
+    }
+
+    userState.step = ConversationStep.MAIN_MENU;
+    return responseText + `\n[TIP] *Tip:* Si necesita detalles específicos, la opción 2 le conecta con un humano.\n\n${this.getMainMenuText()}`;
+  }
 
   private getTimeGreeting(): string {
     const hour = new Date().getHours(); 
-    if (hour >= 5 && hour < 12) return '¡Buenos días! ☀️';
-    if (hour >= 12 && hour < 19) return '¡Buenas tardes! 🌤️';
-    return '¡Buenas noches! 🌙';
+    if (hour >= 5 && hour < 12) return 'Buenos días!';
+    if (hour >= 12 && hour < 19) return 'Buenas tardes!';
+    return 'Buenas noches!';
   }
 
   private getMainMenuText(name?: string): string {
@@ -173,58 +232,49 @@ export class ConversationFlowService {
     return [
       header,
       '',
-      '*1.* 📄 Consultar Deudas',
-      '*2.* 👩‍💻 Hablar con un asesor',
+      '*1.* [DOC] Consultar Deudas',
+      '*2.* [AGENT] Hablar con un asesor',
       '',
       '_(Escriba "Salir" para terminar)_'
     ].join('\n');
   }
 
   private getSurveyQuestion(): string {
-    return 'Antes de irse, ¿me regala 5 segundos? ⏱️\n\n¿Cómo calificaría mi atención hoy?\n\n1️⃣ Mala\n2️⃣ Regular\n3️⃣ ¡Excelente!\n\n(Solo escriba el número)';
+    return 'Antes de irse, ¿me regala 5 segundos?\n\n¿Cómo calificaría mi atención hoy?\n\n1. Mala\n2. Regular\n3. Excelente!\n\n(Solo escriba el número)';
   }
-
-  // ======================================================
-  // 📝 MANEJO DE ENCUESTA - ✅ CON INVALIDACIÓN DE CACHÉ
-  // ======================================================
 
   private async handleSurvey(chat: Chat, text: string): Promise<string> {
     const choice = text.trim().toLowerCase();
     let rating: SurveyRating | null = null;
     let comment: string | null = null;
 
-    if (choice.includes('1') || choice.includes('mala')) rating = SurveyRating.MALA;
-    else if (choice.includes('2') || choice.includes('regular')) rating = SurveyRating.REGULAR;
-    else if (choice.includes('3') || choice.includes('excelente')) rating = SurveyRating.EXCELENTE;
-    else comment = text; 
+    if (choice.includes('1') || choice.includes('mala')) {
+      rating = SurveyRating.MALA;
+    } else if (choice.includes('2') || choice.includes('regular')) {
+      rating = SurveyRating.REGULAR;
+    } else if (choice.includes('3') || choice.includes('excelente')) {
+      rating = SurveyRating.EXCELENTE;
+    } else {
+      comment = text;
+    }
 
     if (rating) {
       try {
-        // Guardar encuesta
         const surveyData = this.surveyResponseRepo.create({ chat, rating, comment });
         await this.surveyResponseRepo.save(surveyData);
         
-        // ✅ CRÍTICO: Invalidar caché del dashboard
         await this.dashboardService.invalidateSurveyCache();
-        
-        // Notificar al frontend
         this.chatGateway.broadcastDashboardUpdate();
         
-        this.logger.log(`✅ Encuesta guardada: ${rating} - Caché invalidado`);
+        this.logger.log(`[SURVEY] Encuesta guardada: ${rating} - Caché invalidado`);
       } catch (error) {
-        this.logger.error('❌ Error guardando encuesta:', error.stack);
-        // No mostramos el error al usuario
+        this.logger.error('[SURVEY] Error guardando encuesta:', error);
       }
     }
 
     await this.redisStore.resetUserState(chat.contactNumber);
-
-    return '¡Muchas gracias por su opinión! Que tenga un día genial. 👋 Kika se despide.';
+    return 'Muchas gracias por su opinión! Que tenga un día genial. Kika se despide.';
   }
-
-  // ======================================================
-  // 📂 MÉTODOS DE BASE DE DATOS
-  // ======================================================
 
   private async findClientById(id: string) {
     try {
@@ -232,7 +282,7 @@ export class ConversationFlowService {
       const result = await this.dataSource.query(query, [id]);
       return result.length > 0 ? result[0] : null;
     } catch (error) { 
-      this.logger.error('Error SQL cliente:', error); 
+      this.logger.error('[DB] Error SQL cliente:', error); 
       return null; 
     }
   }
@@ -248,10 +298,9 @@ export class ConversationFlowService {
 
       const rows = await this.dataSource.query(query, [id]);
       if (rows.length === 0) {
-        return `¡Buenas noticias! No encontré deudas pendientes registradas para la identificación ${id}.`;
+        return `Buenas noticias! No encontré deudas pendientes registradas para la identificación ${id}.`;
       }
       
-      // 🚀 OPTIMIZACIÓN: Ejecutar consultas en PARALELO
       const promesas = rows.map(row => this.obtenerDetalleDeuda(row));
       const detalles = await Promise.all(promesas);
 
@@ -260,7 +309,7 @@ export class ConversationFlowService {
 
       return respuesta;
     } catch (error) { 
-      this.logger.error(`Error en mostrarListaEmpresas: ${error.message}`); 
+      this.logger.error(`[DB] Error en mostrarListaEmpresas: ${error.message}`); 
       return 'Ocurrió un error al consultar sus deudas.'; 
     }
   }
@@ -269,7 +318,7 @@ export class ConversationFlowService {
     try {
       const contratoId = deuda.id;
       const carteraPropia = deuda.carterapropia;
-      let mensaje = `🔹 Deuda con *${this.mapEncabezado(deuda.descripcion)}*:\n`;
+      let mensaje = `[DEBT] Deuda con *${this.mapEncabezado(deuda.descripcion)}*:\n`;
       let foundDetails = false;
 
       if (carteraPropia) {
@@ -305,7 +354,10 @@ export class ConversationFlowService {
         }
       }
       return foundDetails ? mensaje + '\n' : '';
-    } catch (error) { return 'Ocurrió un problema al consultar el detalle de esta deuda.\n'; }
+    } catch (error) {
+      this.logger.error('[DB] Error en obtenerDetalleDeuda:', error);
+      return 'Ocurrió un problema al consultar el detalle de esta deuda.\n';
+    }
   }
 
   private mapEncabezado(desc: string): string {

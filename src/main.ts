@@ -1,10 +1,12 @@
+// main.ts
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
-import { ValidationPipe } from '@nestjs/common';
+import { ValidationPipe, Logger } from '@nestjs/common';
 import * as express from 'express';
-import { join } from 'path';
+import { join } from 'node:path';
 
 async function bootstrap() {
+  const logger = new Logger('Bootstrap');
   const app = await NestFactory.create(AppModule);
 
   app.enableCors({
@@ -16,8 +18,10 @@ async function bootstrap() {
   app.useGlobalPipes(new ValidationPipe());
   app.use('/uploads', express.static(join(__dirname, '..', 'uploads')));
 
- 
+  const port = process.env.PORT || 3000;
+  await app.listen(port);
   
-  await app.listen(3000);
+  logger.log(`[SERVER] Aplicación iniciada en puerto ${port}`);
 }
+
 bootstrap();

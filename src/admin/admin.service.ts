@@ -1,16 +1,16 @@
-// src/admin/admin.service.ts - VERSIÓN CORREGIDA (SONARLINT S2933)
-
-import { Injectable, Inject } from '@nestjs/common';
+// admin.service.ts
+import { Injectable, Inject, Logger } from '@nestjs/common';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
 import { WhatsappService } from '../whatsapp/whatsapp.service';
 
 @Injectable()
 export class AdminService {
+  private readonly logger = new Logger(AdminService.name);
+
   constructor(
     private readonly whatsappService: WhatsappService,
     @Inject(CACHE_MANAGER)
-    // ✅ CORRECCIÓN: Se agregó 'readonly' aquí
     private readonly cacheManager: Cache,
   ) {}
 
@@ -18,15 +18,15 @@ export class AdminService {
     const cacheKey = 'bot:profile';
     const cached = await this.cacheManager.get(cacheKey);
     if (cached) {
-      console.log('📦 Perfil del bot servido desde caché');
+      this.logger.debug('[CACHE] Perfil del bot servido desde caché');
       return cached;
     }
 
-    console.log('🔄 Obteniendo perfil del bot desde WhatsApp...');
+    this.logger.debug('[PROFILE] Obteniendo perfil del bot desde WhatsApp...');
     const profile = await this.whatsappService.getBotProfile();
 
     await this.cacheManager.set(cacheKey, profile, 3600);
-    console.log('💾 Perfil del bot guardado en caché (1 hora)');
+    this.logger.debug('[CACHE] Perfil del bot guardado en caché (1 hora)');
 
     return profile;
   }
@@ -36,7 +36,6 @@ export class AdminService {
       throw new Error('No se proporcionó ningún archivo.');
     }
 
-    // Usamos file.buffer (memoria) si existe, sino file.path (disco)
     const imageSource = file.buffer || file.path;
 
     if (!imageSource) {
@@ -45,9 +44,8 @@ export class AdminService {
 
     await this.whatsappService.setProfilePicture(imageSource);
 
-    // Invalidar caché
     await this.cacheManager.del('bot:profile');
-    console.log('🗑️ Caché de perfil del bot invalidado');
+    this.logger.log('[CACHE] Caché de perfil del bot invalidado');
 
     return { message: 'Foto de perfil actualizada con éxito.' };
   }
@@ -55,7 +53,7 @@ export class AdminService {
   async updateBotStatus(newStatus: string) {
     await this.whatsappService.setBotStatus(newStatus);
     await this.cacheManager.del('bot:profile');
-    console.log('🗑️ Caché de perfil del bot invalidado');
+    this.logger.log('[CACHE] Caché de perfil del bot invalidado');
     return { message: 'Estado/Info del perfil actualizado con éxito.' };
   }
 

@@ -1,5 +1,4 @@
-// src/whatsapp/whatsapp.service.ts - VERSIÓN FINAL CORREGIDA
-
+// whatsapp.service.ts
 import {
   Injectable,
   Logger,
@@ -16,10 +15,10 @@ import makeWASocket, {
 import { Boom } from '@hapi/boom';
 import * as pino from 'pino';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import * as fs from 'node:fs/promises'; // ✅ Best practice
+import * as fs from 'node:fs/promises';
 import { lookup } from 'mime-types';
 import * as qrcode from 'qrcode-terminal';
-import * as path from 'node:path'; // ✅ Best practice
+import * as path from 'node:path';
 
 export interface SimplifiedMessage {
   from: string;
@@ -29,12 +28,6 @@ export interface SimplifiedMessage {
     mimetype: string;
     data: Buffer;
   };
-}
-
-interface RetryConfig {
-  maxAttempts: number;
-  delayMs: number;
-  backoffMultiplier: number;
 }
 
 interface CircuitBreakerState {
@@ -64,7 +57,6 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   private readonly MAX_RECONNECT_ATTEMPTS = 10;
   private reconnectTimer: NodeJS.Timeout | null = null;
 
-  // ✅ 'readonly' agregado (SonarLint S2933)
   constructor(private readonly eventEmitter: EventEmitter2) { }
 
   async onModuleInit() {
@@ -72,7 +64,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleDestroy() {
-    this.logger.log('🛑 Cerrando conexión con WhatsApp limpiamente...');
+    this.logger.log('[SHUTDOWN] Cerrando conexión con WhatsApp limpiamente...');
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -86,7 +78,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
         this.isReady = false;
       }
     } catch (error) {
-      this.logger.error('❌ Error al cerrar WhatsApp:', error);
+      this.logger.error('[SHUTDOWN] Error al cerrar WhatsApp:', error);
     }
   }
 
@@ -99,33 +91,30 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
 
   public async logout() {
     if (this.sock) {
-      this.logger.log('🚪 Logout manual solicitado');
+      this.logger.log('[LOGOUT] Logout manual solicitado');
       await this.sock.logout();
       await this.handleLogout();
     }
   }
 
   private async connectToWhatsApp() {
-    // === FIX START: LIMPIEZA DE ZOMBIES ===
-    // Esto es lo que faltaba para evitar el error 440
     if (this.sock) {
       try {
-        this.logger.debug('🧹 Limpiando conexión socket anterior para evitar conflictos...');
+        this.logger.debug('[CLEANUP] Limpiando conexión socket anterior para evitar conflictos...');
         this.sock.ev.removeAllListeners('connection.update');
         this.sock.ev.removeAllListeners('creds.update');
         this.sock.ev.removeAllListeners('messages.upsert');
         this.sock.end(undefined);
         this.sock = null;
       } catch (error) {
-        this.logger.warn('⚠️ Error al limpiar socket anterior:', error);
+        this.logger.warn('[CLEANUP] Error al limpiar socket anterior:', error);
       }
     }
-    // === FIX END ===
 
     try {
       const { state, saveCreds } = await useMultiFileAuthState('baileys_auth_info');
       const { version } = await fetchLatestBaileysVersion();
-      this.logger.log(`⚡️ Usando Baileys v${version.join('.')}`);
+      this.logger.log(`[INIT] Usando Baileys v${version.join('.')}`);
 
       this.sock = makeWASocket({
         version,
@@ -136,19 +125,17 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
         browser: ['KIKA-Panel', 'Chrome', '1.0.0'],
-
         connectTimeoutMs: 60000,
         defaultQueryTimeoutMs: 60000,
         keepAliveIntervalMs: 10000,
         retryRequestDelayMs: 5000,
-
         markOnlineOnConnect: true,
       });
 
       this.setupEventHandlers(saveCreds);
 
     } catch (error) {
-      this.logger.error('❌ Error fatal iniciando WhatsApp:', error);
+      this.logger.error('[INIT] Error fatal iniciando WhatsApp:', error);
       this.scheduleReconnect();
     }
   }
@@ -164,7 +151,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
-        this.logger.log('📱 QR Code generado.');
+        this.logger.log('[QR] QR Code generado.');
         this.currentQR = qr;
         qrcode.generate(qr, { small: true });
         this.eventEmitter.emit('whatsapp.qr', qr);
@@ -188,9 +175,8 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
     if (statusCode === 440) {
-      this.logger.warn('⚠️ Conflicto de sesión (440) detectado. Reintentando limpieza...');
-      // Reduje el tiempo a 2s porque ahora tenemos limpieza automática en connectToWhatsApp
-      this.scheduleReconnect(2000); 
+      this.logger.warn('[CONFLICT] Conflicto de sesión (440) detectado. Reintentando limpieza...');
+      this.scheduleReconnect(2000);
       return;
     }
 
@@ -202,7 +188,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async handleLogout() {
-    this.logger.warn('🚫 Sesión cerrada. Eliminando credenciales...');
+    this.logger.warn('[LOGOUT] Sesión cerrada. Eliminando credenciales...');
     try {
       this.isReady = false;
       this.currentQR = null;
@@ -211,24 +197,24 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       this.scheduleReconnect(5000);
       this.eventEmitter.emit('whatsapp.status', { status: 'disconnected' });
     } catch (error) {
-      this.logger.error('❌ Error eliminando credenciales:', error);
+      this.logger.error('[LOGOUT] Error eliminando credenciales:', error);
     }
   }
 
   private scheduleReconnect(delayMs?: number) {
     if (this.reconnectAttempts >= this.MAX_RECONNECT_ATTEMPTS) {
-      this.logger.error(`❌ Máximo de intentos de reconexión alcanzado.`);
+      this.logger.error('[RECONNECT] Máximo de intentos de reconexión alcanzado.');
       return;
     }
 
-    // === FIX START: Evitar timers duplicados ===
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
     }
-    // === FIX END ===
 
     this.reconnectAttempts++;
     const delay = delayMs || Math.min(5000 * Math.pow(2, this.reconnectAttempts - 1), 60000);
+    
+    this.logger.log(`[RECONNECT] Intento ${this.reconnectAttempts}/${this.MAX_RECONNECT_ATTEMPTS} en ${delay}ms`);
     
     this.reconnectTimer = setTimeout(() => {
       this.connectToWhatsApp();
@@ -236,7 +222,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   }
 
   private handleSuccessfulConnection() {
-    this.logger.log('✅ ¡Conexión con WhatsApp establecida!');
+    this.logger.log('[CONNECTED] Conexión con WhatsApp establecida correctamente');
     this.isReady = true;
     this.reconnectAttempts = 0;
     this.resetCircuitBreaker();
@@ -257,7 +243,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
         const simplifiedMessage = await this.processIncomingMessage(msg);
         this.eventEmitter.emit('whatsapp.message', simplifiedMessage);
       } catch (error) {
-        this.logger.error('❌ Error procesando mensaje:', error);
+        this.logger.error('[MESSAGE] Error procesando mensaje:', error);
       }
     });
   }
@@ -273,12 +259,10 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       || '';
 
     const hasMediaType = ['imageMessage', 'videoMessage', 'documentMessage'].includes(messageType);
-    let hasMedia = hasMediaType;
+    const hasMedia = hasMediaType;
     const simplifiedMessage: SimplifiedMessage = { from, body, hasMedia };
 
     if (hasMedia) {
-      // Lógica simplificada: indicamos que tiene media pero no la descargamos aquí
-      // para evitar uso excesivo de memoria en mensajes masivos
       simplifiedMessage.hasMedia = false;
     }
     return simplifiedMessage;
@@ -287,21 +271,23 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   private checkCircuitBreaker(): boolean {
     if (this.circuitBreaker.isOpen) {
       if (Date.now() - this.circuitBreaker.lastFailure > this.CIRCUIT_BREAKER_TIMEOUT) {
-        this.resetCircuitBreaker(); return true;
+        this.resetCircuitBreaker();
+        return true;
       }
       return false;
     }
     return true;
   }
-  private resetCircuitBreaker() { this.circuitBreaker = { failures: 0, lastFailure: 0, isOpen: false }; }
 
-  // ✅ CORRECCIÓN S6353: Usar \D en lugar de [^0-9]
+  private resetCircuitBreaker() {
+    this.circuitBreaker = { failures: 0, lastFailure: 0, isOpen: false };
+  }
+
   private toJid(number: string): string {
     if (number.includes('@s.whatsapp.net')) return number;
     return `${number.replaceAll(/\D/g, '')}@s.whatsapp.net`;
   }
 
-  // Métodos de mensajería (Restaurados)
   async sendMessage(to: string, text: string): Promise<void> {
     if (!this.isReady) throw new Error('WhatsApp no conectado');
     const jid = this.toJid(to);
@@ -315,8 +301,8 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       await this.sock.sendPresenceUpdate('composing', jid);
       await new Promise((resolve) => setTimeout(resolve, durationMs));
       await this.sock.sendPresenceUpdate('paused', jid);
-    } catch (e) {
-      this.logger.warn(`Error enviando typing: ${e}`);
+    } catch (error) {
+      this.logger.warn('[TYPING] Error enviando typing:', error);
     }
   }
 
@@ -346,26 +332,24 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     await this.sock.sendMessage(jid, messageOptions);
   }
 
-  // ✅ CORRECCIÓN: Bloques Try/Catch manejados correctamente
   async getBotProfile() {
     if (!this.isReady || !this.sock?.user) throw new Error('WhatsApp no listo');
 
     const botJid = jidNormalizedUser(this.sock.user.id);
-
-    this.logger.log(`🔍 Debug: Buscando foto para JID Normalizado: ${botJid}`);
+    this.logger.log(`[PROFILE] Buscando foto para JID: ${botJid}`);
 
     let profilePicUrl = null;
 
     try {
       profilePicUrl = await this.sock.profilePictureUrl(botJid, 'image', 15000);
-      this.logger.log('✅ Foto HD encontrada');
+      this.logger.log('[PROFILE] Foto HD encontrada');
     } catch (error) {
-      this.logger.warn(`⚠️ Error foto HD: ${error}`);
+      this.logger.warn('[PROFILE] Error foto HD:', error);
       try {
         profilePicUrl = await this.sock.profilePictureUrl(botJid, 'preview', 10000);
-        this.logger.log('✅ Foto Preview encontrada');
-      } catch (error_) { // ✅ S7718: Renombrado a error_
-        this.logger.error(`❌ No se pudo obtener foto: ${error_}`);
+        this.logger.log('[PROFILE] Foto Preview encontrada');
+      } catch (error_) {
+        this.logger.error('[PROFILE] No se pudo obtener foto:', error_);
       }
     }
 
@@ -381,9 +365,13 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     if (!this.isReady) throw new Error('WhatsApp no conectado');
     let buffer: Buffer;
 
-    if (Buffer.isBuffer(file)) buffer = file;
-    else if (typeof file === 'string') buffer = await fs.readFile(file);
-    else throw new Error('Archivo inválido');
+    if (Buffer.isBuffer(file)) {
+      buffer = file;
+    } else if (typeof file === 'string') {
+      buffer = await fs.readFile(file);
+    } else {
+      throw new TypeError('Archivo inválido: debe ser Buffer o string');
+    }
 
     const botJid = jidNormalizedUser(this.sock.user.id);
     await this.sock.updateProfilePicture(botJid, buffer);
@@ -394,10 +382,20 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     const jid = this.toJid(contactId);
     try {
       const profilePicUrl = await this.sock.profilePictureUrl(jid, 'image').catch(() => null);
-      return { id: jid, number: jid.split('@')[0], profilePicUrl, pushname: 'Usuario' };
+      return {
+        id: jid,
+        number: jid.split('@')[0],
+        profilePicUrl,
+        pushname: 'Usuario'
+      };
     } catch (error) {
-      this.logger.verbose(`No se pudo obtener info de contacto ${contactId}: ${error}`);
-      return { id: jid, number: jid.split('@')[0], profilePicUrl: null, name: 'No disponible' };
+      this.logger.verbose(`[CONTACT] No se pudo obtener info de ${contactId}:`, error);
+      return {
+        id: jid,
+        number: jid.split('@')[0],
+        profilePicUrl: null,
+        name: 'No disponible'
+      };
     }
   }
 
@@ -409,7 +407,10 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     return {
       isReady: this.isReady,
       reconnectAttempts: this.reconnectAttempts,
-      circuitBreaker: { isOpen: this.circuitBreaker.isOpen, failures: this.circuitBreaker.failures },
+      circuitBreaker: {
+        isOpen: this.circuitBreaker.isOpen,
+        failures: this.circuitBreaker.failures
+      },
       maxReconnectAttempts: this.MAX_RECONNECT_ATTEMPTS,
     };
   }

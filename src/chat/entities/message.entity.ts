@@ -1,10 +1,10 @@
+// message.entity.ts
 import {
   Entity,
   PrimaryGeneratedColumn,
   Column,
   ManyToOne,
   CreateDateColumn,
-  UpdateDateColumn,
 } from 'typeorm';
 import { Chat } from './chat.entity';
 import { MessageSender } from '../../common/enums/message-sender.enum';
@@ -32,13 +32,11 @@ export class Message {
   @Column({ type: 'text' })
   content: string;
 
-  // --- NUEVOS CAMPOS ---
   @Column({ nullable: true })
-  mediaUrl: string; // Guardará la ruta pública del archivo
+  mediaUrl: string;
 
   @Column({ nullable: true })
-  mimeType: string; // Guardará el tipo de archivo (ej. 'image/png')
-  // ---------------------
+  mimeType: string;
 
   @CreateDateColumn()
   timestamp: Date;
