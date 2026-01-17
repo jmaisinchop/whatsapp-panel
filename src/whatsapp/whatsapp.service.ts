@@ -1,4 +1,4 @@
-// whatsapp.service.ts
+// src/whatsapp/whatsapp.service.ts - VERSIÓN CORREGIDA (SonarLint fix)
 import {
   Injectable,
   Logger,
@@ -10,7 +10,8 @@ import makeWASocket, {
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
   useMultiFileAuthState,
-  jidNormalizedUser
+  jidNormalizedUser,
+  downloadMediaMessage
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import * as pino from 'pino';
@@ -253,34 +254,98 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     const messageContent = msg.message;
     const messageType = Object.keys(messageContent)[0];
 
+    // Extraer el texto del mensaje
     const body = messageContent.conversation
       || messageContent.extendedTextMessage?.text
       || messageContent.imageMessage?.caption
+      || messageContent.videoMessage?.caption
+      || messageContent.documentMessage?.caption
       || '';
 
-    const hasMediaType = ['imageMessage', 'videoMessage', 'documentMessage'].includes(messageType);
-    const hasMedia = hasMediaType;
+    // Tipos de mensaje que contienen media
+    const mediaTypes = ['imageMessage', 'videoMessage', 'documentMessage', 'audioMessage'];
+    const hasMedia = mediaTypes.includes(messageType);
+
     const simplifiedMessage: SimplifiedMessage = { from, body, hasMedia };
 
+    // ✅ CORRECCIÓN: Descargar y procesar media si existe
     if (hasMedia) {
-      simplifiedMessage.hasMedia = false;
+      try {
+        this.logger.debug(`[MEDIA] Descargando ${messageType} de ${from}...`);
+        
+        // ✅ FIX SonarLint S4325: Remover casteo innecesario
+        const buffer = await downloadMediaMessage(
+          msg,
+          'buffer',
+          {},
+          {
+            logger: pino({ level: 'silent' }),
+            reuploadRequest: this.sock.updateMediaMessage
+          }
+        );
+
+        // Validar que el buffer sea válido
+        if (!buffer || !Buffer.isBuffer(buffer) || buffer.length === 0) {
+          this.logger.warn(`[MEDIA] Buffer inválido o vacío para ${messageType}`);
+          simplifiedMessage.hasMedia = false;
+          return simplifiedMessage;
+        }
+
+        // Validar tamaño del archivo
+        if (buffer.length > this.MAX_FILE_SIZE) {
+          this.logger.warn(`[MEDIA] Archivo demasiado grande (${buffer.length} bytes). Máximo: ${this.MAX_FILE_SIZE}`);
+          simplifiedMessage.hasMedia = false;
+          simplifiedMessage.body = body || '[Archivo demasiado grande - no procesado]';
+          return simplifiedMessage;
+        }
+
+        // Obtener mimetype
+        const mimetype = messageContent[messageType]?.mimetype 
+          || 'application/octet-stream';
+
+        simplifiedMessage.media = {
+          mimetype,
+          data: buffer
+        };
+
+        this.logger.log(`[MEDIA] Media descargado correctamente: ${mimetype}, ${buffer.length} bytes`);
+
+      } catch (error) {
+        this.logger.error(`[MEDIA] Error descargando media:`, error);
+        simplifiedMessage.hasMedia = false;
+        simplifiedMessage.body = body || '[Error descargando archivo adjunto]';
+      }
     }
+
     return simplifiedMessage;
   }
 
   private checkCircuitBreaker(): boolean {
     if (this.circuitBreaker.isOpen) {
       if (Date.now() - this.circuitBreaker.lastFailure > this.CIRCUIT_BREAKER_TIMEOUT) {
+        this.logger.log('[CIRCUIT_BREAKER] Reiniciando - timeout alcanzado');
         this.resetCircuitBreaker();
         return true;
       }
+      this.logger.warn('[CIRCUIT_BREAKER] Abierto - rechazando operación');
       return false;
     }
     return true;
   }
 
+  private recordFailure() {
+    this.circuitBreaker.failures++;
+    this.circuitBreaker.lastFailure = Date.now();
+
+    if (this.circuitBreaker.failures >= this.CIRCUIT_BREAKER_THRESHOLD) {
+      this.circuitBreaker.isOpen = true;
+      this.logger.error(`[CIRCUIT_BREAKER] Abierto después de ${this.circuitBreaker.failures} fallos`);
+    }
+  }
+
   private resetCircuitBreaker() {
     this.circuitBreaker = { failures: 0, lastFailure: 0, isOpen: false };
+    this.logger.debug('[CIRCUIT_BREAKER] Reseteado');
   }
 
   private toJid(number: string): string {
@@ -289,9 +354,25 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   }
 
   async sendMessage(to: string, text: string): Promise<void> {
-    if (!this.isReady) throw new Error('WhatsApp no conectado');
-    const jid = this.toJid(to);
-    await this.sock.sendMessage(jid, { text });
+    if (!this.isReady) {
+      const error = new Error('WhatsApp no conectado');
+      this.recordFailure();
+      throw error;
+    }
+
+    if (!this.checkCircuitBreaker()) {
+      throw new Error('WhatsApp temporalmente no disponible (circuit breaker abierto)');
+    }
+
+    try {
+      const jid = this.toJid(to);
+      await this.sock.sendMessage(jid, { text });
+      this.logger.debug(`[SEND] Mensaje enviado a ${to}`);
+    } catch (error) {
+      this.logger.error('[SEND] Error enviando mensaje:', error);
+      this.recordFailure();
+      throw error;
+    }
   }
 
   async sendTyping(to: string, durationMs: number = 2000) {
@@ -307,29 +388,44 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   }
 
   async sendMedia(to: string, filePath: string, caption?: string): Promise<void> {
-    if (!this.isReady) throw new Error('WhatsApp no conectado');
-
-    const jid = this.toJid(to);
-    const mimeType = lookup(filePath);
-
-    if (!mimeType) throw new Error('Tipo de archivo desconocido');
-
-    const messageOptions: any = { caption: caption || '' };
-
-    if (mimeType.startsWith('image/')) {
-      messageOptions.image = { url: filePath };
-    } else if (mimeType.startsWith('video/')) {
-      messageOptions.video = { url: filePath };
-    } else if (mimeType.startsWith('audio/')) {
-      messageOptions.audio = { url: filePath };
-      messageOptions.mimetype = mimeType;
-    } else {
-      messageOptions.document = { url: filePath };
-      messageOptions.mimetype = mimeType;
-      messageOptions.fileName = path.basename(filePath);
+    if (!this.isReady) {
+      const error = new Error('WhatsApp no conectado');
+      this.recordFailure();
+      throw error;
     }
 
-    await this.sock.sendMessage(jid, messageOptions);
+    if (!this.checkCircuitBreaker()) {
+      throw new Error('WhatsApp temporalmente no disponible (circuit breaker abierto)');
+    }
+
+    try {
+      const jid = this.toJid(to);
+      const mimeType = lookup(filePath);
+
+      if (!mimeType) throw new Error('Tipo de archivo desconocido');
+
+      const messageOptions: any = { caption: caption || '' };
+
+      if (mimeType.startsWith('image/')) {
+        messageOptions.image = { url: filePath };
+      } else if (mimeType.startsWith('video/')) {
+        messageOptions.video = { url: filePath };
+      } else if (mimeType.startsWith('audio/')) {
+        messageOptions.audio = { url: filePath };
+        messageOptions.mimetype = mimeType;
+      } else {
+        messageOptions.document = { url: filePath };
+        messageOptions.mimetype = mimeType;
+        messageOptions.fileName = path.basename(filePath);
+      }
+
+      await this.sock.sendMessage(jid, messageOptions);
+      this.logger.log(`[SEND_MEDIA] Archivo enviado: ${path.basename(filePath)}`);
+    } catch (error) {
+      this.logger.error('[SEND_MEDIA] Error enviando media:', error);
+      this.recordFailure();
+      throw error;
+    }
   }
 
   async getBotProfile() {

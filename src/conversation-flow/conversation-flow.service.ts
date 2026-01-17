@@ -1,4 +1,3 @@
-// conversation-flow.service.ts
 import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
 import { DataSource, Repository } from 'typeorm';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -9,6 +8,7 @@ import { UserState } from './conversation-flow.interface';
 import { SurveyResponse, SurveyRating } from '../chat/entities/survey-response.entity';
 import { ChatGateway } from '../chat/chat.gateway';
 import { DashboardService } from '../dashboard/dashboard.service';
+import { ChatService } from '../chat/chat.service';
 
 @Injectable()
 export class ConversationFlowService {
@@ -21,6 +21,8 @@ export class ConversationFlowService {
     private readonly chatGateway: ChatGateway,
     @Inject(forwardRef(() => DashboardService))
     private readonly dashboardService: DashboardService,
+    @Inject(forwardRef(() => ChatService))
+    private readonly chatService: ChatService,
     private readonly redisStore: RedisStateStore,
     private readonly dataSource: DataSource,
   ) { }
@@ -267,6 +269,9 @@ export class ConversationFlowService {
         this.chatGateway.broadcastDashboardUpdate();
         
         this.logger.log(`[SURVEY] Encuesta guardada: ${rating} - Caché invalidado`);
+        
+        await this.chatService.finalizeChat(chat.id);
+        
       } catch (error) {
         this.logger.error('[SURVEY] Error guardando encuesta:', error);
       }

@@ -1,4 +1,4 @@
-// chat.controller.ts
+// src/chat/chat.controller.ts - VERSIÓN CORREGIDA CON PAGINACIÓN DE MENSAJES
 import {
   Controller,
   Get,
@@ -42,6 +42,19 @@ export class ChatController {
   @Get(':id')
   findOne(@Param('id', ParseIntPipe) id: number) {
     return this.chatService.findOne(id);
+  }
+
+  // ✅ NUEVO ENDPOINT: Obtener mensajes paginados de un chat
+  @Get(':id/messages')
+  getMessages(
+    @Param('id', ParseIntPipe) chatId: number,
+    @Query('page', ParseIntPipe) page: number = 1,
+    @Query('limit', ParseIntPipe) limit: number = 50,
+  ) {
+    if (limit > 100) {
+      throw new BadRequestException('El límite máximo es 100 mensajes por página');
+    }
+    return this.chatService.getChatMessages(chatId, page, limit);
   }
 
   @Patch(':id/read')
