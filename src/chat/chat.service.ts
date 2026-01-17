@@ -707,12 +707,14 @@ export class ChatService implements OnModuleInit, OnModuleDestroy {
     const [messages, total] = await this.messageRepo
       .createQueryBuilder('message')
       .where('message.chatId = :chatId', { chatId })
-      .orderBy('message.id', 'ASC')
+      .orderBy('message.id', 'DESC')
       .skip(skip)
       .take(limit)
       .getManyAndCount();
 
     const totalPages = Math.ceil(total / limit);
+
+    messages.reverse();
 
     return {
       data: messages,
@@ -726,6 +728,7 @@ export class ChatService implements OnModuleInit, OnModuleDestroy {
       },
     };
   }
+
 
   async findOne(chatId: number) {
     return this.chatRepo
