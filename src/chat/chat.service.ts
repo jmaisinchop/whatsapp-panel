@@ -173,7 +173,8 @@ export class ChatService implements OnModuleInit, OnModuleDestroy {
     } catch (error) {
       this.logger.error(`[FLOW_ERROR] Error en flujo chat #${chat.id}:`, error.stack);
       await this.whatsappService.sendTyping(chat.contactNumber, 2000);
-      await this.sendBotMessage(chat, 'Tuve un problema técnico. Un asesor te contactará pronto.');
+      // MENSAJE DE ERROR AMIGABLE
+      await this.sendBotMessage(chat, '¡Ups! Tuve un pequeño problema técnico 🛠️. Un asesor humano te contactará pronto para ayudarte 👨‍💻.');
       await this.activateChatWithAdvisor(chat);
     }
   }
@@ -182,7 +183,8 @@ export class ChatService implements OnModuleInit, OnModuleDestroy {
     chat.status = ChatStatus.ACTIVE;
     await this.chatRepo.save(chat);
 
-    const handoffMessage = '¡Entendido! Uno de nuestros asesores se pondrá en contacto con usted lo más pronto posible. Por favor espere un momento.';
+    // MENSAJE DE PASO A ASESOR AMIGABLE
+    const handoffMessage = '¡Entendido! 👌 Uno de nuestros asesores se pondrá en contacto contigo lo más pronto posible.\n\nPor favor, espera un momento mientras revisan tu caso ⏳👨‍💻.';
     await this.sendBotMessage(chat, handoffMessage);
 
     this.chatGateway.notifyNewChat(chat);
@@ -320,7 +322,8 @@ export class ChatService implements OnModuleInit, OnModuleDestroy {
     if (sendSurvey) {
       try {
         await this.whatsappService.sendTyping(chat.contactNumber, 2000);
-        const surveyQuestion = 'Antes de finalizar, ¿podría calificar mi atención?\n\n1. Mala\n2. Regular\n3. Excelente\n\n(Por favor escriba el número)';
+        // ENCUESTA AMIGABLE
+        const surveyQuestion = 'Antes de finalizar, ¿podrías calificar mi atención? ⭐\n\n1️⃣ Mala\n2️⃣ Regular\n3️⃣ Excelente\n\n_(Por favor solo escribe el número)_';
         await this.sendBotMessage(chat, surveyQuestion);
 
         const userState = await this.redisStore.getUserState(chat.contactNumber);
@@ -382,7 +385,8 @@ export class ChatService implements OnModuleInit, OnModuleDestroy {
 
     try {
       await this.whatsappService.sendTyping(completeUpdatedChat.contactNumber, 2000);
-      const farewellMessage = 'Gracias por escribirnos. Si necesitas algo más, aquí estaré. ¡Hasta pronto!';
+      // DESPEDIDA AMIGABLE
+      const farewellMessage = '¡Gracias por escribirnos! 🙌 Si necesitas algo más, aquí estaré. ¡Hasta pronto! 👋🤖';
       await this.sendBotMessage(completeUpdatedChat, farewellMessage);
     } catch (error) {
       this.logger.error(`[FAREWELL] Error enviando mensaje de despedida:`, error);
@@ -468,9 +472,10 @@ export class ChatService implements OnModuleInit, OnModuleDestroy {
 
         try {
           await this.whatsappService.sendTyping(chat.contactNumber, 2000);
+          // MENSAJE TIMEOUT AMIGABLE
           await this.sendBotMessage(
             chat,
-            'La sesión ha caducado por inactividad. Si necesita algo más, vuelva a escribirnos.'
+            'La sesión ha caducado por inactividad 💤. Si necesitas algo más, ¡vuelve a escribirnos! 👋'
           );
           await this.redisStore.resetUserState(chat.contactNumber);
         } catch (error) {
@@ -665,7 +670,7 @@ export class ChatService implements OnModuleInit, OnModuleDestroy {
     const { page = 1, limit = 50 } = paginationDto;
     const skip = (page - 1) * limit;
 
-    const [data, total] = await this.chatRepo
+    const [chats, total] = await this.chatRepo
       .createQueryBuilder('chat')
       .leftJoinAndSelect('chat.assignedTo', 'assignedTo')
       .select([
@@ -685,6 +690,68 @@ export class ChatService implements OnModuleInit, OnModuleDestroy {
       .skip(skip)
       .take(limit)
       .getManyAndCount();
+
+    const chatIds = chats.map(chat => chat.id);
+
+    if (chatIds.length === 0) {
+      return {
+        data: [],
+        meta: {
+          total,
+          page,
+          limit,
+          totalPages: 0,
+          hasNextPage: false,
+          hasPreviousPage: false,
+        },
+      };
+    }
+
+    const lastMessageIdsRaw = await this.dataSource.query(
+      `
+      SELECT DISTINCT ON ("chatId") 
+        id, "chatId"
+      FROM message
+      WHERE "chatId" = ANY($1)
+      ORDER BY "chatId", id DESC
+      `,
+      [chatIds]
+    );
+
+    const messageIds = lastMessageIdsRaw.map(row => row.id);
+
+    let lastMessages: Message[] = [];
+
+    if (messageIds.length > 0) {
+      lastMessages = await this.messageRepo
+        .createQueryBuilder('message')
+        .leftJoinAndSelect('message.chat', 'chat')
+        .select([
+          'message.id',
+          'message.sender',
+          'message.content',
+          'message.mediaUrl',
+          'message.mimeType',
+          'message.timestamp',
+          'chat.id',
+        ])
+        .where('message.id IN (:...messageIds)', { messageIds })
+        .getMany();
+    }
+
+    const messagesByChatId = new Map();
+    lastMessages.forEach(msg => {
+      const chatId = msg.chat?.id;
+      if (chatId) {
+        const { chat, ...messageWithoutChat } = msg;
+        messagesByChatId.set(chatId, messageWithoutChat);
+      }
+    });
+
+    const data = chats.map(chat => ({
+      ...chat,
+      messages: messagesByChatId.has(chat.id) ? [messagesByChatId.get(chat.id)] : []
+    }));
 
     const totalPages = Math.ceil(total / limit);
 

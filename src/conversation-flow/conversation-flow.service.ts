@@ -35,6 +35,7 @@ export class ConversationFlowService {
     const text = rawText.trim();
     const lowerText = text.toLowerCase();
 
+    // Manejo de comandos de salida
     const exitResponse = this.handleExitCommands(lowerText, userState, freshChat);
     if (exitResponse) {
       if (exitResponse.newStep) {
@@ -45,10 +46,12 @@ export class ConversationFlowService {
       return exitResponse.message;
     }
 
+    // Manejo de encuesta
     if (userState.step === ConversationStep.SURVEY) {
       return await this.handleSurvey(chat, text);
     }
 
+    // Proceso principal por pasos
     const responseText = await this.processConversationStep(
       userState,
       text,
@@ -61,6 +64,7 @@ export class ConversationFlowService {
     return responseText;
   }
 
+  // --- MANEJO DE COMANDOS DE SALIDA ---
   private handleExitCommands(
     lowerText: string,
     userState: UserState,
@@ -72,10 +76,12 @@ export class ConversationFlowService {
       return null;
     }
 
+    // Si pide menú estando en menú
     if (userState.step === ConversationStep.MAIN_MENU && ['menu', 'inicio', '0'].includes(lowerText)) {
       return { message: this.getMainMenuText(freshChat.customerName) };
     }
 
+    // Si pide salir definitivamente
     if (['salir', 'chao', 'adios', 'fin', 'terminar'].includes(lowerText)) {
       return {
         message: this.getSurveyQuestion(),
@@ -83,13 +89,15 @@ export class ConversationFlowService {
       };
     }
 
+    // Reset general
     return {
-      message: '[RESET] Entendido. Regresamos al menú principal.\n\n' + this.getMainMenuText(),
+      message: '¡Entendido! Regresamos al menú principal 🏠.\n\n' + this.getMainMenuText(freshChat.customerName, false),
       newStep: ConversationStep.MAIN_MENU,
       resetTerms: true
     };
   }
 
+  // --- PROCESO DE PASOS ---
   private async processConversationStep(
     userState: UserState,
     text: string,
@@ -107,7 +115,7 @@ export class ConversationFlowService {
       }
 
       case ConversationStep.MAIN_MENU: {
-        return this.handleMainMenuStep(userState, text, lowerText);
+        return this.handleMainMenuStep(userState, text, lowerText, freshChat);
       }
 
       case ConversationStep.DISCLAIMER: {
@@ -120,52 +128,56 @@ export class ConversationFlowService {
 
       default: {
         userState.step = ConversationStep.MAIN_MENU;
-        return '[ERROR] Ups! Me confundí un poco. Mejor empecemos de nuevo.\n\n' + this.getMainMenuText();
+        return '¡Ups! 😅 Me confundí un poco. Mejor empecemos de nuevo.\n\n' + this.getMainMenuText(freshChat.customerName);
       }
     }
   }
 
+  // --- HANDLERS ESPECÍFICOS ---
+
   private handleStartStep(userState: UserState, freshChat: Chat): string {
     if (freshChat.customerName) {
       userState.step = ConversationStep.MAIN_MENU;
-      return `${this.getTimeGreeting()}, ${freshChat.customerName}. Qué gusto verle de nuevo!\n\n` + this.getMainMenuText();
+      // Saludo personalizado Kika
+      return this.getMainMenuText(freshChat.customerName, true); 
     }
 
     userState.step = ConversationStep.ASK_FOR_NAME;
-    return `${this.getTimeGreeting()} Soy Kika, su asistente virtual.\n\nPara brindarle una mejor atención, ¿podría indicarme su nombre, por favor?`;
+    return `${this.getTimeGreeting()} 👋 Soy Kika, tu asistente virtual.\n\nPara brindarte una mejor atención, ¿podrías indicarme tu nombre, por favor?`;
   }
 
   private async handleNameStep(userState: UserState, text: string, freshChat: Chat): Promise<string> {
     if (text.length < 3 || /\d/.test(text)) {
-      return 'Ese nombre no parece válido. Por favor, escriba solo su nombre real para continuar.';
+      return 'Mmm... ese nombre no parece válido 🤔. Por favor, escribe solo tu nombre real para continuar.';
     }
 
     freshChat.customerName = text;
     await this.dataSource.getRepository(Chat).save(freshChat);
     
     userState.step = ConversationStep.MAIN_MENU;
-    return `Un gusto, ${text}! [OK] Ya he registrado sus datos.\n\n` + this.getMainMenuText();
+    // Ya tenemos nombre, mostramos menú completo
+    return this.getMainMenuText(text, true);
   }
 
-  private handleMainMenuStep(userState: UserState, text: string, lowerText: string): string {
+  private handleMainMenuStep(userState: UserState, text: string, lowerText: string, freshChat: Chat): string {
     const isConsultOption = text === '1' || lowerText.includes('consultar') || lowerText.includes('deuda');
     const isAdvisorOption = text === '2' || lowerText.includes('asesor') || lowerText.includes('agente');
 
     if (isConsultOption) {
       if (userState.termsAccepted) {
         userState.step = ConversationStep.PEDIR_CEDULA;
-        return '[OK] Perfecto. Por favor, ingrese su número de cédula para realizar la consulta.';
+        return '¡Perfecto! 👌 Por favor, ingresa tu número de cédula para realizar la consulta.';
       }
 
       userState.step = ConversationStep.DISCLAIMER;
-      return '[TERMS] Antes de mostrarle información privada, necesito que acepte nuestros Términos y Condiciones: https://www.finsolred.com/terminos-y-condiciones-uso-del-chatbot\n\n¿Está de acuerdo? (Responda "Sí" o "No")';
+      return 'Antes de mostrarte información privada 🔒, necesito que aceptes nuestros Términos y Condiciones: https://www.finsolred.com/terminos-y-condiciones-uso-del-chatbot\n\n¿Estás de acuerdo? (Responde "Sí" o "No")';
     }
 
     if (isAdvisorOption) {
       return '__ACTIVATE_CHAT_WITH_ADVISOR__';
     }
 
-    return 'No entendí esa opción. Por favor, elija una de las siguientes:\n\n' + this.getMainMenuText();
+    return 'No entendí esa opción 😅. Por favor, elige una de las siguientes:\n\n' + this.getMainMenuText(freshChat.customerName, false);
   }
 
   private handleDisclaimerStep(userState: UserState, lowerText: string): string {
@@ -175,22 +187,22 @@ export class ConversationFlowService {
     if (acceptTerms) {
       userState.termsAccepted = true;
       userState.step = ConversationStep.PEDIR_CEDULA;
-      return 'Gracias por confirmar! [OK]\n\nAhora sí, escríbame su número de cédula para buscar sus deudas.';
+      return '¡Gracias por confirmar! ✅\n\nAhora sí, escríbeme tu número de cédula para buscar tus deudas.';
     }
 
     if (rejectTerms) {
       userState.step = ConversationStep.MAIN_MENU;
-      return 'Comprendo. Respetamos su privacidad, pero sin su autorización no puedo mostrarle la información.\n\n' + this.getMainMenuText();
+      return 'Comprendo. Respetamos tu privacidad, pero sin tu autorización no puedo mostrarte la información 🛡️.\n\n' + this.getMainMenuText(undefined, false);
     }
 
-    return 'Necesito una confirmación clara. Por favor responda "Sí" para continuar o "No" para cancelar.';
+    return 'Necesito una confirmación clara. Por favor responde "Sí" para continuar o "No" para cancelar.';
   }
 
   private async handleCedulaStep(userState: UserState, text: string, freshChat: Chat): Promise<string> {
     const idInput = text.trim();
 
     if (idInput.length < 5) {
-      return 'El número parece muy corto. Por favor verifique e intente nuevamente.';
+      return 'El número parece muy corto. Por favor verifica e intenta nuevamente.';
     }
 
     const client = await this.findClientById(idInput);
@@ -200,7 +212,7 @@ export class ConversationFlowService {
     }
 
     userState.step = ConversationStep.MAIN_MENU;
-    return `[SEARCH] Busqué en el sistema, pero no encontré registros con la cédula *${idInput}*.\n\n¿Desea intentar otra vez?\n` + this.getMainMenuText();
+    return `Busqué en el sistema 🔎, pero no encontré registros con la cédula *${idInput}*.\n\n¿Deseas intentar otra vez?\n` + this.getMainMenuText(freshChat.customerName, false);
   }
 
   private async buildClientDebtResponse(
@@ -212,37 +224,59 @@ export class ConversationFlowService {
     const deudasTexto = await this.mostrarListaEmpresas(idInput);
     let responseText: string;
 
-    if (deudasTexto.includes("Buenas noticias!")) {
-      responseText = `Estimado/a ${freshChat.customerName}, le tengo buenas noticias! [OK]\n\n*No registra deudas pendientes con nosotros.*`;
+    if (deudasTexto.includes("Buenas noticias")) {
+      responseText = `¡Estimado/a ${freshChat.customerName}, te tengo buenas noticias! 🎉\n\n*No registras deudas pendientes con nosotros.*`;
     } else {
-      responseText = `Hola ${client.nombre}, aquí tiene su estado de cuenta:\n\n${deudasTexto}`;
+      responseText = `Hola ${client.nombre}, aquí tienes tu estado de cuenta 📄:\n\n${deudasTexto}`;
     }
 
     userState.step = ConversationStep.MAIN_MENU;
-    return responseText + `\n[TIP] *Tip:* Si necesita detalles específicos, la opción 2 le conecta con un humano.\n\n${this.getMainMenuText()}`;
+    return responseText + `\n💡 *Tip:* Si necesitas detalles específicos, la opción 2 te conecta con un humano.\n\n${this.getMainMenuText(freshChat.customerName, false)}`;
+  }
+
+  // --- GENERACIÓN DE MENÚS Y TEXTOS AMIGABLES (LÓGICA KIKA) ---
+
+  /**
+   * Genera el menú principal con formato limpio y emojis.
+   * @param name Nombre del cliente (opcional)
+   * @param includeIntro Si es true, agrega el saludo "Soy Kika..." al inicio.
+   */
+  private getMainMenuText(name?: string, includeIntro: boolean = true): string {
+    let mensaje = '';
+
+    // 1. Saludo inicial (Opcional)
+    if (includeIntro) {
+        mensaje += `¡${this.getTimeGreeting()}, ${name || ''}! Soy Kika 🤖.\n`;
+        mensaje += `Es un gusto saludarte. ¿En qué puedo ayudarte hoy?\n\n`;
+    } else {
+        mensaje += name ? `¿En qué más te puedo ayudar, ${name}? 👇` : 'Aquí tienes tus opciones:';
+        mensaje += '\n\n';
+    }
+
+    // 2. Definición de opciones "sucias" (como vienen del sistema o hardcodeadas)
+    // NOTA: Aquí quitamos los [DOC] para procesarlos, o los dejamos si quieres mantener la estructura original
+    // Para simplificar, aquí construyo el menú limpio directamente:
+    
+    mensaje += '1️⃣ Consultar Deudas\n';
+    mensaje += '2️⃣ Hablar con un asesor\n';
+
+    // 3. Footer
+    mensaje += '\n💡 _(Escribe "Salir" para terminar)_';
+
+    return mensaje;
   }
 
   private getTimeGreeting(): string {
     const hour = new Date().getHours(); 
-    if (hour >= 5 && hour < 12) return 'Buenos días!';
-    if (hour >= 12 && hour < 19) return 'Buenas tardes!';
-    return 'Buenas noches!';
+    if (hour >= 5 && hour < 12) return 'Buenos días';
+    if (hour >= 12 && hour < 19) return 'Buenas tardes';
+    return 'Buenas noches';
   }
 
-  private getMainMenuText(name?: string): string {
-    const header = name ? '¿En qué puedo ayudarle ahora?' : 'Aquí tiene sus opciones:';
-    return [
-      header,
-      '',
-      '*1.* [DOC] Consultar Deudas',
-      '*2.* [AGENT] Hablar con un asesor',
-      '',
-      '_(Escriba "Salir" para terminar)_'
-    ].join('\n');
-  }
+  // --- ENCUESTA ---
 
   private getSurveyQuestion(): string {
-    return 'Antes de irse, ¿me regala 5 segundos?\n\n¿Cómo calificaría mi atención hoy?\n\n1. Mala\n2. Regular\n3. Excelente!\n\n(Solo escriba el número)';
+    return 'Antes de irte, ¿me regalas 5 segundos? ⏱️\n\n¿Cómo calificarías mi atención hoy?\n\n1️⃣ Mala\n2️⃣ Regular\n3️⃣ Excelente!\n\n_(Solo escribe el número)_';
   }
 
   private async handleSurvey(chat: Chat, text: string): Promise<string> {
@@ -278,8 +312,10 @@ export class ConversationFlowService {
     }
 
     await this.redisStore.resetUserState(chat.contactNumber);
-    return 'Muchas gracias por su opinión! Que tenga un día genial. Kika se despide.';
+    return '¡Muchas gracias por tu opinión! 🙌 Que tengas un día genial. Kika se despide.';
   }
+
+  // --- LOGICA DE BASE DE DATOS (INTACTA) ---
 
   private async findClientById(id: string) {
     try {
@@ -323,7 +359,7 @@ export class ConversationFlowService {
     try {
       const contratoId = deuda.id;
       const carteraPropia = deuda.carterapropia;
-      let mensaje = `[DEBT] Deuda con *${this.mapEncabezado(deuda.descripcion)}*:\n`;
+      let mensaje = `💰 Deuda con *${this.mapEncabezado(deuda.descripcion)}*:\n`;
       let foundDetails = false;
 
       if (carteraPropia) {
@@ -337,9 +373,9 @@ export class ConversationFlowService {
         if (result.length > 0) {
           foundDetails = true;
           for (const r of result) {
-            mensaje += `   - Producto: ${r.descripcion || 'No especificado'}\n`;
-            mensaje += `   - Valor Total: $${Number(r.valortotaldeuda).toFixed(2)}\n`;
-            mensaje += `   - Valor Liquidación: $${Number(r.valor_liquidacion).toFixed(2)}\n`;
+            mensaje += `   ▪️ Producto: ${r.descripcion || 'No especificado'}\n`;
+            mensaje += `   ▪️ Valor Total: $${Number(r.valortotaldeuda).toFixed(2)}\n`;
+            mensaje += `   ▪️ Valor Liquidación: $${Number(r.valor_liquidacion).toFixed(2)}\n`;
           }
         }
       } else {
@@ -353,8 +389,8 @@ export class ConversationFlowService {
         if (result.length > 0) {
           foundDetails = true;
           for (const r of result) {
-            mensaje += `   - Producto: ${r.descripcion || 'No especificado'}\n`;
-            mensaje += `   - Deuda al corte: $${Number(r.pagominimo).toFixed(2)}\n`;
+            mensaje += `   ▪️ Producto: ${r.descripcion || 'No especificado'}\n`;
+            mensaje += `   ▪️ Deuda al corte: $${Number(r.pagominimo).toFixed(2)}\n`;
           }
         }
       }

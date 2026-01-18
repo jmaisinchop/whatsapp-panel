@@ -75,7 +75,7 @@ import { EventEmitterModule } from '@nestjs/event-emitter';
         password: configService.get<string>('DB_PASSWORD'),
         database: configService.get<string>('DB_NAME'),
         entities: [__dirname + '/**/*.entity{.ts,.js}'],
-        synchronize: true,
+        //synchronize: true,
         
         // ✅ CONNECTION POOL MEJORADO (FASE 3)
         extra: {
