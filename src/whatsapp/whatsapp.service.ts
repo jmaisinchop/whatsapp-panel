@@ -1,4 +1,4 @@
-// src/whatsapp/whatsapp.service.ts - VERSIÓN CORREGIDA (SonarLint fix)
+// src/whatsapp/whatsapp.service.ts - VERSIÓN MEJORADA CON FIX PARA BAD MAC ERROR
 import {
   Injectable,
   Logger,
@@ -57,6 +57,11 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   private reconnectAttempts = 0;
   private readonly MAX_RECONNECT_ATTEMPTS = 10;
   private reconnectTimer: NodeJS.Timeout | null = null;
+
+  // ✅ NUEVO: Contador de errores de sesión
+  private sessionErrorCount = 0;
+  private readonly MAX_SESSION_ERRORS = 10;
+  private lastSessionErrorReset = Date.now();
 
   constructor(private readonly eventEmitter: EventEmitter2) { }
 
@@ -131,6 +136,12 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
         keepAliveIntervalMs: 10000,
         retryRequestDelayMs: 5000,
         markOnlineOnConnect: true,
+        // ✅ NUEVO: Configuración para manejar mejor las sesiones
+        getMessage: async (key) => {
+          // Retorna undefined para mensajes que no podemos recuperar
+          // Esto evita intentos de desencriptación fallidos
+          return undefined;
+        },
       });
 
       this.setupEventHandlers(saveCreds);
@@ -235,6 +246,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     this.sock.ev.on('creds.update', saveCreds);
   }
 
+  // ✅ MEJORADO: Handler de mensajes con manejo robusto de errores de sesión
   private setupMessagesHandler() {
     this.sock.ev.on('messages.upsert', async (m) => {
       const msg = m.messages[0];
@@ -243,10 +255,63 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       try {
         const simplifiedMessage = await this.processIncomingMessage(msg);
         this.eventEmitter.emit('whatsapp.message', simplifiedMessage);
+        
+        // ✅ Resetear contador de errores de sesión en mensajes exitosos
+        this.sessionErrorCount = 0;
+        
       } catch (error) {
+        // ✅ MANEJO ESPECÍFICO DE ERRORES DE SESIÓN/DESENCRIPTACIÓN
+        if (this.isSessionError(error)) {
+          this.handleSessionError(msg.key.remoteJid, error);
+          return; // Ignorar este mensaje y continuar
+        }
+        
         this.logger.error('[MESSAGE] Error procesando mensaje:', error);
       }
     });
+  }
+
+  // ✅ NUEVO: Detectar errores de sesión
+  private isSessionError(error: any): boolean {
+    const errorMessage = error?.message?.toLowerCase() || '';
+    const errorStack = error?.stack?.toLowerCase() || '';
+    
+    return (
+      errorMessage.includes('bad mac') ||
+      errorMessage.includes('decrypt') ||
+      errorMessage.includes('session') ||
+      errorStack.includes('verifymac') ||
+      errorStack.includes('decryptwhispermessage')
+    );
+  }
+
+  // ✅ NUEVO: Manejar errores de sesión
+  private handleSessionError(remoteJid: string, error: any) {
+    this.sessionErrorCount++;
+    
+    // Resetear contador cada 5 minutos
+    if (Date.now() - this.lastSessionErrorReset > 300000) {
+      this.sessionErrorCount = 0;
+      this.lastSessionErrorReset = Date.now();
+    }
+
+    const contactNumber = remoteJid.split('@')[0];
+    
+    this.logger.warn(
+      `[SESSION_ERROR] Error de desencriptación #${this.sessionErrorCount} para ${contactNumber}. ` +
+      `Mensaje ignorado - la conversación continuará normalmente.`
+    );
+
+    // Si hay demasiados errores de sesión, podría indicar un problema mayor
+    if (this.sessionErrorCount >= this.MAX_SESSION_ERRORS) {
+      this.logger.error(
+        `[SESSION_ERROR] Demasiados errores de sesión (${this.sessionErrorCount}). ` +
+        `Esto podría indicar credenciales corruptas.`
+      );
+      
+      // Opcionalmente, podrías forzar una reconexión aquí
+      // this.logger.warn('[SESSION_ERROR] Considerando reconexión para limpiar sesiones...');
+    }
   }
 
   private async processIncomingMessage(msg: any): Promise<SimplifiedMessage> {
@@ -268,12 +333,11 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
 
     const simplifiedMessage: SimplifiedMessage = { from, body, hasMedia };
 
-    // ✅ CORRECCIÓN: Descargar y procesar media si existe
+    // Descargar y procesar media si existe
     if (hasMedia) {
       try {
         this.logger.debug(`[MEDIA] Descargando ${messageType} de ${from}...`);
         
-        // ✅ FIX SonarLint S4325: Remover casteo innecesario
         const buffer = await downloadMediaMessage(
           msg,
           'buffer',
@@ -508,6 +572,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
         failures: this.circuitBreaker.failures
       },
       maxReconnectAttempts: this.MAX_RECONNECT_ATTEMPTS,
+      sessionErrors: this.sessionErrorCount, // ✅ NUEVO
     };
   }
 }

@@ -1,8 +1,3 @@
-// src/chat/chat.module.ts - VERSIÓN CORREGIDA
-// =====================================================
-// ✅ IMPORTA DashboardModule para invalidación de caché
-// =====================================================
-
 import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { Chat } from './entities/chat.entity';
@@ -21,13 +16,13 @@ import { JwtModule } from '@nestjs/jwt';
 import { ContactsController } from './contacts.controller'; 
 import { SurveyResponse } from './entities/survey-response.entity';
 import { InternalNote } from './entities/internal-note.entity';
-import { DashboardModule } from '../dashboard/dashboard.module'; // ✅ AGREGADO
+import { DashboardModule } from '../dashboard/dashboard.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([Chat, Message, SurveyResponse, InternalNote]),
     forwardRef(() => WhatsappModule),
-    forwardRef(() => DashboardModule), // ✅ AGREGADO para invalidación de caché
+    forwardRef(() => DashboardModule),
     UserModule,
     ScheduleModule.forRoot(),
     ConfigModule,
@@ -37,7 +32,9 @@ import { DashboardModule } from '../dashboard/dashboard.module'; // ✅ AGREGADO
       inject: [ConfigService],
       useFactory: (configService: ConfigService) => ({
         secret: configService.get<string>('JWT_SECRET'),
-        signOptions: { expiresIn: configService.get<string>('JWT_EXPIRES_IN') },
+        signOptions: { 
+          expiresIn: configService.get<string>('JWT_EXPIRES_IN', '24h') as any  // ✅ FIX
+        },
       }),
     }),
   ],

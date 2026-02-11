@@ -44,7 +44,6 @@ export class ChatController {
     return this.chatService.findOne(id);
   }
 
-  // ✅ NUEVO ENDPOINT: Obtener mensajes paginados de un chat
   @Get(':id/messages')
   getMessages(
     @Param('id', ParseIntPipe) chatId: number,
